@@ -53,7 +53,7 @@ def detect_layout(
 
     for sep in candidates:
         field_counts = [
-            (lambda n: n if n >= 2 else 0)(len(line.rstrip(sep).split(sep)))
+            n if (n := len(line.rstrip(sep).split(sep))) >= 2 else 0
             for line in lines
         ]
 

@@ -321,3 +321,96 @@ def test_hypothesis_basytec_normalize():
             assert df_out[bdf_label].dtype in (pl.Float64, pl.Int64)
 
     inner()
+
+
+# ---------------------------------------------------------------------------
+# normalize — column_map, include_optional, extra_columns (tasks 7.1–7.6)
+# ---------------------------------------------------------------------------
+
+def test_column_map_unit_conversion():
+    """column_map: custom source col with bracket unit → pint conversion applied."""
+    df = pl.DataFrame({
+        "~Time[s]": ["1.0"],
+        "my_volt[mV]": ["1000.0"],
+        "I[A]": ["0.1"],
+    })
+    df_out, _ = normalize(df, source="basytec_txt", column_map={"Voltage / V": "my_volt[mV]"})
+    assert "Voltage / V" in df_out.columns
+    assert df_out["Voltage / V"][0] == pytest.approx(1.0)
+
+
+def test_column_map_invalid_label_raises():
+    """Invalid BDF label in column_map raises ValueError before any output."""
+    df = pl.DataFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"]})
+    with pytest.raises(ValueError, match="not a valid BDF label"):
+        normalize(df, source="basytec_txt", column_map={"NotALabel": "U[V]"})
+
+
+def test_include_optional_false_required_only():
+    """include_optional=False: output contains only required BDF columns."""
+    df = pl.DataFrame({
+        "time/s": ["1.0"],
+        "Ecell/V": ["3.5"],
+        "I/mA": ["100.0"],
+        "cycle number": ["1"],
+    })
+    df_out, _ = normalize(df, source="biologic_mpt", include_optional=False)
+    assert "Test Time / s" in df_out.columns
+    assert "Voltage / V" in df_out.columns
+    assert "Current / A" in df_out.columns
+    assert "Cycle Count / 1" not in df_out.columns
+
+
+def test_include_optional_false_suppresses_column_map_optional():
+    """include_optional=False suppresses column_map entry targeting optional BDF column."""
+    df = pl.DataFrame({
+        "time/s": ["1.0"],
+        "Ecell/V": ["3.5"],
+        "I/mA": ["100.0"],
+        "my_cycle": ["5"],
+    })
+    df_out, _ = normalize(
+        df,
+        source="biologic_mpt",
+        column_map={"Cycle Count / 1": "my_cycle"},
+        include_optional=False,
+    )
+    assert "Cycle Count / 1" not in df_out.columns
+
+
+def test_extra_columns_passthrough():
+    """extra_columns renames source col; dtype and values preserved."""
+    df = pl.DataFrame({
+        "time/s": ["1.0"],
+        "Ecell/V": ["3.5"],
+        "protocol_id": ["charge_cc"],
+    })
+    df_out, _ = normalize(df, source="biologic_mpt", extra_columns={"protocol_id": "Protocol"})
+    assert "Protocol" in df_out.columns
+    assert df_out["Protocol"][0] == "charge_cc"
+    assert df_out["Protocol"].dtype == pl.String
+
+
+def test_extra_columns_missing_source_warns():
+    """extra_columns with absent source col emits UserWarning; col absent from output."""
+    import warnings as _warnings
+    df = pl.DataFrame({"time/s": ["1.0"], "Ecell/V": ["3.5"]})
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        df_out, _ = normalize(df, source="biologic_mpt", extra_columns={"ghost_col": "Output"})
+    assert any(issubclass(w.category, UserWarning) for w in caught)
+    assert "Output" not in df_out.columns
+
+
+# ---------------------------------------------------------------------------
+# read() — column mapping args forwarded (task 7.7)
+# ---------------------------------------------------------------------------
+
+def test_read_forwards_column_mapping_args(tmp_path):
+    """read() forwards include_optional, column_map, extra_columns to normalize()."""
+    from bdf2._read import read
+    csv = tmp_path / "test.csv"
+    csv.write_text("time/s,Ecell/V,I/mA,cycle number\n1.0,3.5,100.0,1\n")
+    df_out, _ = read(str(csv), source="biologic_mpt", include_optional=False)
+    assert "Test Time / s" in df_out.columns
+    assert "Cycle Count / 1" not in df_out.columns

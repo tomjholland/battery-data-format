@@ -17,6 +17,10 @@ def read(
     path: str | Path,
     source: str | None = None,
     lazy: bool = False,
+    *,
+    column_map: dict[str, str] | None = None,
+    include_optional: bool = True,
+    extra_columns: dict[str, str] | None = None,
 ) -> tuple[Union[pl.DataFrame, pl.LazyFrame], dict]:
     """
     Read a battery cycler file and return (bdf_df, metadata).
@@ -29,7 +33,7 @@ def read(
     config = load_config()
 
     sample = read_sample(path)
-    head_bytes = path.read_bytes()[:8192]
+    head_bytes = sample[:8192].encode("utf-8", errors="replace")
 
     if source is None:
         source = sniff_source(head_bytes, config)
@@ -45,7 +49,13 @@ def read(
         infer_schema=False,
     )
 
-    bdf_lf, meta = normalize(lf, source=source)
+    bdf_lf, meta = normalize(
+        lf,
+        source=source,
+        column_map=column_map,
+        include_optional=include_optional,
+        extra_columns=extra_columns,
+    )
 
     confirmed_source = meta.get("source")
     if confirmed_source:
