@@ -51,10 +51,25 @@ def test_read_basytec_txt():
 def test_read_biologic_mpt():
     path = SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt"
     df, meta = read(path)
-    print(df)
-    assert 0==1
     _assert_bdf_output(df, meta, "biologic_mpt", ["Test Time / s", "Voltage / V"])
     assert df.shape[0] > 0
+    expected_cols = {
+        "Step Index / 1",
+        "Test Time / s",
+        "Voltage / V",
+        "Current / A",
+        "Cumulative Capacity / Ah",
+        "Charging Energy / Wh",
+        "Discharging Energy / Wh",
+        "Step Time / s",
+        "Discharging Capacity / Ah",
+        "Charging Capacity / Ah",
+        "Cycle Count / 1",
+        "Power / W",
+        "Internal Resistance / Ohm",
+        "Ambient Temperature / degC",
+    }
+    assert set(df.columns) == expected_cols
 
 
 def test_read_biologic_no_header():

@@ -23,10 +23,6 @@ BDF_KEYS = set(load_config()["columns"].keys())
 BDF_LABELS = {v["label"] for v in load_config()["columns"].values()}
 
 
-# ---------------------------------------------------------------------------
-# extract_qty_unit
-# ---------------------------------------------------------------------------
-
 def test_extract_qty_unit_parens():
     import re
     rx = [re.compile(r"^(.+?)\s*\(([^)]+)\)$")]
@@ -49,10 +45,6 @@ def test_extract_qty_unit_no_match_returns_full():
     assert qty == "Voltage"
     assert unit is None
 
-
-# ---------------------------------------------------------------------------
-# pint_factor
-# ---------------------------------------------------------------------------
 
 def test_pint_factor_ma_to_a():
     f = pint_factor("mA", "A")
@@ -87,10 +79,6 @@ def test_pint_factor_mah_to_ah():
     assert f == pytest.approx(0.001)
 
 
-# ---------------------------------------------------------------------------
-# detect_source_from_columns
-# ---------------------------------------------------------------------------
-
 def test_detect_source_basytec():
     from bdf2._config import get_synonym_index
     index = get_synonym_index()
@@ -115,10 +103,6 @@ def test_detect_source_no_match():
     assert src is None
 
 
-# ---------------------------------------------------------------------------
-# normalize — basic column mapping
-# ---------------------------------------------------------------------------
-
 def test_normalize_basytec_column_rename():
     df = pl.DataFrame({"~Time[s]": ["1.0", "2.0"], "U[V]": ["3.5", "3.6"], "I[A]": ["0.1", "0.2"]})
     df_out, meta = normalize(df, source="basytec_txt")
@@ -128,10 +112,35 @@ def test_normalize_basytec_column_rename():
     assert meta["source"] == "basytec_txt"
 
 
-def test_normalize_unknown_column_preserved():
+def test_normalize_logging(caplog):
+    """normalize emits INFO lines for match, miss, and duplicate."""
+    import logging
+    df = pl.DataFrame({
+        "Ecell/V": ["3.5"],
+        "Ns changes": ["1"],
+        "(Q-Qo)/mA.h": ["1.0"],
+        "Capacity/mA.h": ["2.0"],
+    })
+    with caplog.at_level(logging.INFO, logger="bdf2._normalize"):
+        normalize(df, source="biologic_mpt")
+    messages = caplog.messages
+    assert any("matched" in m and "Ecell/V" in m for m in messages)
+    assert any("no match" in m and "Ns changes" in m for m in messages)
+    assert any("duplicate" in m and "Capacity/mA.h" in m for m in messages)
+
+
+def test_normalize_duplicate_label_column_dropped():
+    """Second vendor column resolving to the same BDF label is dropped."""
+    df = pl.DataFrame({"(Q-Qo)/mA.h": ["1.0"], "Capacity/mA.h": ["2.0"]})
+    df_out, _ = normalize(df, source="biologic_mpt")
+    assert "Cumulative Capacity / Ah" in df_out.columns
+    assert df_out.shape[1] == 1
+
+
+def test_normalize_unknown_column_dropped():
     df = pl.DataFrame({"~Time[s]": ["1.0"], "Mystery": ["abc"]})
     df_out, meta = normalize(df, source="basytec_txt")
-    assert "Mystery" in df_out.columns
+    assert "Mystery" not in df_out.columns
 
 
 def test_normalize_dtype_float64():
@@ -234,9 +243,57 @@ def test_normalize_real_file_headers(source_id, path, expected_cols):
         assert col in df_out.columns, f"Missing {col!r} for {source_id}"
 
 
-# ---------------------------------------------------------------------------
-# _sniff_decimal
-# ---------------------------------------------------------------------------
+def _all_synonym_triples():
+    """Yield (source_id, bdf_key, synonym) for every synonym in columns.json."""
+    config = load_config()
+    for bdf_key, col_def in config["columns"].items():
+        for source_id, synonyms in col_def.get("synonyms", {}).items():
+            for synonym in synonyms:
+                yield source_id, bdf_key, synonym
+
+
+def _synonym_triple_ids(triple):
+    source_id, bdf_key, synonym = triple
+    return f"{source_id}-{bdf_key}-{synonym}"
+
+
+_TRIPLES = list(_all_synonym_triples())
+
+
+@pytest.mark.parametrize("source_id,bdf_key,synonym", _TRIPLES, ids=[
+    _synonym_triple_ids(t) for t in _TRIPLES
+])
+def test_all_synonyms_produce_bdf_label(source_id, bdf_key, synonym):
+    """Every synonym must cause normalize to output the corresponding BDF label."""
+    config = load_config()
+    bdf_label = config["columns"][bdf_key]["label"]
+    df = pl.DataFrame({synonym: ["1.0"]})
+    df_out, meta = normalize(df, source=source_id)
+    assert bdf_label in df_out.columns, (
+        f"{source_id!r} synonym {synonym!r} → expected label {bdf_label!r} "
+        f"in output columns {df_out.columns}"
+    )
+
+
+@pytest.mark.parametrize("source_id,bdf_key,synonym", _TRIPLES, ids=[
+    _synonym_triple_ids(t) for t in _TRIPLES
+])
+def test_all_synonyms_produce_correct_dtype(source_id, bdf_key, synonym):
+    """Every synonym must produce the canonical BDF dtype (Float64 or Int64)."""
+    config = load_config()
+    col_def = config["columns"][bdf_key]
+    bdf_label = col_def["label"]
+    dtype_str = col_def.get("dtype", "float")
+    expected_dtype = pl.Int64 if dtype_str == "int" else pl.Float64
+
+    df = pl.DataFrame({synonym: ["1"]})
+    df_out, _ = normalize(df, source=source_id)
+    assert bdf_label in df_out.columns
+    actual = df_out[bdf_label].dtype
+    assert actual == expected_dtype, (
+        f"{source_id!r}/{synonym!r}: expected {expected_dtype}, got {actual}"
+    )
+
 
 def test_sniff_decimal_comma_strings():
     from bdf2._normalize import _sniff_decimal
@@ -262,10 +319,6 @@ def test_sniff_decimal_float_columns_only():
     assert _sniff_decimal(df) == "."
 
 
-# ---------------------------------------------------------------------------
-# normalize_pandas wrapper
-# ---------------------------------------------------------------------------
-
 def test_normalize_pandas_returns_pandas():
     import pandas as pd
     df = pd.DataFrame({"U[V]": [3.5, 3.6], "I[A]": [0.1, 0.2]})
@@ -273,59 +326,6 @@ def test_normalize_pandas_returns_pandas():
     assert isinstance(df_out, pd.DataFrame)
     assert "Voltage / V" in df_out.columns
 
-
-# ---------------------------------------------------------------------------
-# Hypothesis tests (task 5.7) — skipped when hypothesis not installed
-# ---------------------------------------------------------------------------
-
-try:
-    from hypothesis import given, settings
-    from hypothesis import strategies as st
-    _HYPOTHESIS = True
-except ImportError:
-    _HYPOTHESIS = False
-
-
-@pytest.mark.skipif(not _HYPOTHESIS, reason="hypothesis not installed")
-def test_hypothesis_basytec_normalize():
-    """Synthetic basytec_txt DataFrame normalises to BDF column names."""
-    from hypothesis import given, settings
-    from hypothesis import strategies as st
-
-    config = load_config()
-    col_defs = config["columns"]
-    synonyms = {
-        bdf_key: col_def["synonyms"]["basytec_txt"]
-        for bdf_key, col_def in col_defs.items()
-        if "basytec_txt" in col_def.get("synonyms", {})
-    }
-    col_map = {syns[0]: bdf_key for bdf_key, syns in synonyms.items()}
-    cols = list(col_map.keys())
-
-    @settings(max_examples=20)
-    @given(st.data())
-    def inner(data):
-        n = data.draw(st.integers(min_value=1, max_value=5))
-        df_data = {
-            col: [str(data.draw(st.floats(min_value=0, max_value=1e4, allow_nan=False)))
-                  for _ in range(n)]
-            for col in cols
-        }
-        df = pl.DataFrame(df_data)
-        df_out, meta = normalize(df, source="basytec_txt")
-
-        assert meta["source"] == "basytec_txt"
-        for col, bdf_key in col_map.items():
-            bdf_label = col_defs[bdf_key]["label"]
-            assert bdf_label in df_out.columns
-            assert df_out[bdf_label].dtype in (pl.Float64, pl.Int64)
-
-    inner()
-
-
-# ---------------------------------------------------------------------------
-# normalize — column_map, include_optional, extra_columns (tasks 7.1–7.6)
-# ---------------------------------------------------------------------------
 
 def test_column_map_unit_conversion():
     """column_map: custom source col with bracket unit → pint conversion applied."""
@@ -401,10 +401,6 @@ def test_extra_columns_missing_source_warns():
     assert any(issubclass(w.category, UserWarning) for w in caught)
     assert "Output" not in df_out.columns
 
-
-# ---------------------------------------------------------------------------
-# read() — column mapping args forwarded (task 7.7)
-# ---------------------------------------------------------------------------
 
 def test_read_forwards_column_mapping_args(tmp_path):
     """read() forwards include_optional, column_map, extra_columns to normalize()."""

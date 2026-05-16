@@ -6,9 +6,9 @@
       "required": true,
       "dtype": "float",
       "synonyms": {
-        "basytec_txt":   ["time[s]", "time[h]", "time[min]", "time[h:min:s]", "time"],
+        "basytec_txt":   ["time[s]", "time"],
         "biologic_mpt":  ["time/s", "time / s", "t (s)", "time [s]", "relative time(s)"],
-        "neware_csv":    ["total time(s)", "test time(s)", "totaltime(s)", "totaltime_s", "total time", "总时间(s)", "测试时间(s)", "time [s]"],
+        "neware_csv":    ["total time(s)", "test time(s)", "totaltime(s)", "totaltime_s", "total time", "总时间(s)", "测试时间(s)"],
         "novonix_csv":   ["run time (h)", "run-time (h)", "runtime (h)", "test time (h)", "testtime(h)"],
         "digatron_csv":  ["program duration#s", "prog time", "program time"],
         "landt_csv":     ["test_time_s"],
@@ -23,14 +23,14 @@
       "required": true,
       "dtype": "float",
       "synonyms": {
-        "basytec_txt":   ["u[v]", "u[mv]", "voltage[v]", "u", "voltage"],
-        "biologic_mpt":  ["ewe/v", "ecell/v", "u/v", "u[v]", "ewe (v)", "ewe/v (v)", "<ewe>/v"],
-        "neware_csv":    ["voltage(v)", "电压(v)", "voltage [v]"],
-        "novonix_csv":   ["potential (v)", "voltage (v)", "cell voltage (v)"],
-        "digatron_csv":  ["voltage#v", "voltage"],
+        "basytec_txt":   ["u[V]", "voltage[V]", "u", "voltage"],
+        "biologic_mpt":  ["ewe/V", "ecell/V", "u/V", "u[V]", "ewe (V)", "<ewe>/V"],
+        "neware_csv":    ["voltage(V)", "电压(V)", "voltage [V]"],
+        "novonix_csv":   ["potential (V)", "voltage (V)", "cell voltage (V)"],
+        "digatron_csv":  ["voltage#V", "voltage"],
         "landt_csv":     ["voltage_v"],
-        "landt_txt":     ["volts", "volt", "voltage", "v"],
-        "arbin_csv":     ["voltage (v)"],
+        "landt_txt":     ["volts", "volt", "voltage", "V"],
+        "arbin_csv":     ["voltage (V)"],
         "maccor_csv":    ["voltage"]
       }
     },
@@ -40,14 +40,14 @@
       "required": true,
       "dtype": "float",
       "synonyms": {
-        "basytec_txt":   ["i[a]", "i[ma]", "i[ua]", "current[a]", "i", "current"],
-        "biologic_mpt":  ["i/ma", "i[a]", "current / a", "current(a)", "i / ma", "<i>/ma", "i(a)", "i/a"],
-        "neware_csv":    ["current(a)", "电流(a)", "current [a]"],
-        "novonix_csv":   ["current (a)", "cell current (a)"],
-        "digatron_csv":  ["current#a", "current"],
+        "basytec_txt":   ["i[A]", "current[A]", "i", "current"],
+        "biologic_mpt":  ["i[A]", "current / A", "current(A)", "i(A)", "i/A"],
+        "neware_csv":    ["current(A)", "电流(A)", "current [A]"],
+        "novonix_csv":   ["current (A)", "cell current (A)"],
+        "digatron_csv":  ["current#A", "current"],
         "landt_csv":     ["current_a"],
-        "landt_txt":     ["amps", "amp", "current", "a", "i(a)"],
-        "arbin_csv":     ["current (a)"],
+        "landt_txt":     ["amps", "amp", "current", "A", "i(A)"],
+        "arbin_csv":     ["current (A)"],
         "maccor_csv":    ["current"]
       }
     },
@@ -62,6 +62,22 @@
         "arbin_csv":     ["date time"],
         "maccor_csv":    ["dpt time"],
         "neware_csv":    ["date", "datetime", "date_time"]
+      },
+      "datetime_synonyms": {
+        "neware_csv": {
+          "date":      "%Y-%m-%d %H:%M:%S%.f",
+          "datetime":  "%Y-%m-%d %H:%M:%S%.f",
+          "date_time": "%Y-%m-%d %H:%M:%S%.f"
+        },
+        "arbin_csv": {
+          "date time": "%m/%d/%Y %H:%M:%S%.f"
+        },
+        "maccor_csv": {
+          "dpt time": "%d-%b-%y %I:%M:%S %p"
+        },
+        "novonix_csv": {
+          "date and time": "%Y-%m-%d %H:%M:%S"
+        }
       }
     },
     "cycle_count": {
@@ -100,6 +116,7 @@
       "required": false,
       "dtype": "int",
       "synonyms": {
+        "biologic_mpt": ["Ns"],
         "novonix_csv":   ["step position"],
         "digatron_csv":  ["step"],
         "neware_csv":    ["record"],
@@ -129,16 +146,12 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "basytec_txt":   ["t1[°c]", "t1[c]", "t1[degc]", "temp[°c]", "temperature[°c]"],
-        "biologic_mpt":  [
-          "temperature/c", "temperature/degc", "temperature/°c", "temperature/øc",
-          "temp/c", "temp/degc", "temp/°c", "temp/øc",
-          "t/c", "t/°c", "t/øc"
-        ],
+        "basytec_txt":   ["t1[degC]", "temp[°c]", "temperature[°c]"],
+        "biologic_mpt":  ["temperature/degC", "temp/degC", "t/°c", "t/øc"],
         "neware_csv":    ["temperature(°c)", "温度(°c)"],
-        "novonix_csv":   ["temperature (°c)", "temperature (c)", "ambient temperature (c)", "ambient temp (c)"],
-        "digatron_csv":  ["tenv#degc"],
-        "arbin_csv":     ["aux_temperature_1 (c)"],
+        "novonix_csv":   ["temperature (°c)", "ambient temperature (°c)", "ambient temp (°c)"],
+        "digatron_csv":  ["tenv#degC"],
+        "arbin_csv":     ["aux_temperature_1 (°c)"],
         "maccor_csv":    ["temp 1"]
       }
     },
@@ -148,10 +161,10 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["q charge/ma.h", "q charge /ma.h"],
-        "neware_csv":    ["charge capacity(mah)", "chg.capacity(mah)"],
-        "digatron_csv":  ["ahcha#ah"],
-        "arbin_csv":     ["charge capacity (ah)"]
+        "biologic_mpt":  ["q charge/mA.h", "q charge /mA.h"],
+        "neware_csv":    ["charge capacity(mAh)", "chg.capacity(mAh)"],
+        "digatron_csv":  ["AhCha#Ah"],
+        "arbin_csv":     ["charge capacity (Ah)"]
       }
     },
     "discharging_capacity_ah": {
@@ -160,10 +173,10 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["q discharge/ma.h", "q discharge /ma.h"],
-        "neware_csv":    ["discharge capacity(mah)", "dchg.capacity(mah)"],
-        "digatron_csv":  ["ahdch#ah"],
-        "arbin_csv":     ["discharge capacity (ah)"]
+        "biologic_mpt":  ["q discharge/mA.h", "q discharge /mA.h"],
+        "neware_csv":    ["discharge capacity(mAh)", "dchg.capacity(mAh)"],
+        "digatron_csv":  ["AhDch#Ah"],
+        "arbin_csv":     ["discharge capacity (Ah)"]
       }
     },
     "step_capacity_ah": {
@@ -172,8 +185,8 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["dq/ma.h"],
-        "digatron_csv":  ["ahstep#ah"]
+        "biologic_mpt":  ["dq/mA.h"],
+        "digatron_csv":  ["AhStep#Ah"]
       }
     },
     "net_capacity_ah": {
@@ -182,8 +195,8 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "novonix_csv":   ["capacity (ah)", "net capacity (ah)"],
-        "digatron_csv":  ["ahbal#ah"],
+        "novonix_csv":   ["capacity (Ah)", "net capacity (Ah)"],
+        "digatron_csv":  ["AhBal#Ah"],
         "maccor_csv":    ["capacity"]
       }
     },
@@ -193,8 +206,8 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["(q-qo)/ma.h", "capacity/ma.h"],
-        "digatron_csv":  ["ahaccu#ah", "ahaccu"]
+        "biologic_mpt":  ["(q-qo)/mA.h", "capacity/mA.h"],
+        "digatron_csv":  ["AhAccu#Ah", "AhAccu"]
       }
     },
     "charging_energy_wh": {
@@ -203,9 +216,9 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["energy charge/w.h"],
-        "digatron_csv":  ["whcha#wh"],
-        "arbin_csv":     ["charge energy (wh)"]
+        "biologic_mpt":  ["energy charge/W.h"],
+        "digatron_csv":  ["WhCha#Wh"],
+        "arbin_csv":     ["charge energy (Wh)"]
       }
     },
     "discharging_energy_wh": {
@@ -214,9 +227,9 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["energy discharge/w.h"],
-        "digatron_csv":  ["whdch#wh"],
-        "arbin_csv":     ["discharge energy (wh)"]
+        "biologic_mpt":  ["energy discharge/W.h"],
+        "digatron_csv":  ["WhDch#Wh"],
+        "arbin_csv":     ["discharge energy (Wh)"]
       }
     },
     "step_energy_wh": {
@@ -225,7 +238,7 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "digatron_csv":  ["whstep#wh"]
+        "digatron_csv":  ["WhStep#Wh"]
       }
     },
     "net_energy_wh": {
@@ -234,7 +247,7 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "novonix_csv":   ["energy (wh)", "net energy (wh)"],
+        "novonix_csv":   ["energy (Wh)", "net energy (Wh)"],
         "maccor_csv":    ["energy"]
       }
     },
@@ -244,8 +257,8 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["|energy|/w.h"],
-        "digatron_csv":  ["whaccu#wh", "whaccu"]
+        "biologic_mpt":  ["|energy|/W.h"],
+        "digatron_csv":  ["WhAccu#Wh", "WhAccu"]
       }
     },
     "power_watt": {
@@ -254,10 +267,10 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "biologic_mpt":  ["p/w"],
-        "novonix_csv":   ["power(w)", "power (w)"],
-        "digatron_csv":  ["watt", "power#w"],
-        "arbin_csv":     ["power (w)"]
+        "biologic_mpt":  ["p/W"],
+        "novonix_csv":   ["power(W)", "power (W)"],
+        "digatron_csv":  ["watt", "power#W"],
+        "arbin_csv":     ["power (W)"]
       }
     },
     "internal_resistance_ohm": {
@@ -290,8 +303,8 @@
       "required": false,
       "dtype": "float",
       "synonyms": {
-        "novonix_csv":   ["circuit temperature (°c)", "circuit temp (°c)", "circuit temperature (c)"],
-        "digatron_csv":  ["t1#degc", "logtemp001"]
+        "novonix_csv":   ["circuit temperature (°c)", "circuit temp (°c)"],
+        "digatron_csv":  ["t1#degC", "logtemp001"]
       }
     },
     "temperature_t2_celsius": {
@@ -343,7 +356,7 @@
         "^<(.+?)>/(.+)$",
         "^(.+?)\\s*/\\s*(.+)$"
       ],
-      "datetime_formats": ["%m/%d/%Y %H:%M:%S.%f", "%m/%d/%Y %H:%M:%S"],
+      "datetime_formats": ["%m/%d/%Y %H:%M:%S%.f", "%m/%d/%Y %H:%M:%S"],
       "metadata_patterns": {
         "acquisition_started": "Acquisition started on\\s*:\\s*(.+)",
         "channel":             "Run on channel\\s*:\\s*(.+)"
@@ -357,7 +370,7 @@
         "^(.+?)\\s*\\[([^\\]]+)\\]$"
       ],
       "datetime_formats": [
-        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S"
       ],
@@ -398,7 +411,7 @@
       "magic": [],
       "qty_unit_regexes": ["^(.+?)\\s*\\(([^)]+)\\)$"],
       "datetime_formats": [
-        "%m/%d/%Y %H:%M:%S.%f",
+        "%m/%d/%Y %H:%M:%S%.f",
         "%m/%d/%Y %H:%M:%S",
         "%Y-%m-%d %H:%M:%S"
       ],
@@ -422,10 +435,10 @@
   "datetime_formats": [
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S%.f",
+    "%Y-%m-%d %H:%M:%S%.f",
     "%m/%d/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M:%S",
-    "%m/%d/%Y %H:%M:%S.%f"
+    "%m/%d/%Y %H:%M:%S%.f"
   ]
 }

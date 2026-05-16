@@ -2,31 +2,34 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Union
 
 import polars as pl
 import pint
 
-from ._config import extract_qty_unit, get_source_regexes, get_synonym_index, load_config
+from ._config import (
+    extract_qty_unit,
+    get_datetime_index,
+    get_source_regexes,
+    get_synonym_index,
+    load_config,
+)
 
 _ureg = pint.UnitRegistry()
+_logger = logging.getLogger(__name__)
 
-_UNIT_ALIASES: dict[str, str] = {
-    "ma.h": "mAh",
-    "w.h": "Wh",
-    "mw.h": "mWh",
-    "kw.h": "kWh",
-    "°c": "degC",
-    "\xb0c": "degC",
-    "\xf8c": "degC",
-    "sec": "s",
-    "min": "min",
-}
-
-
-def _coerce_unit(u: str) -> str:
-    return _UNIT_ALIASES.get(u.lower(), u)
+# Register unit strings that cycler files use but pint does not know natively.
+for _alias, _canonical in [
+    ("degc", "degC"),     # basytec/biologic/digatron write lower-case degc
+    ("degreec", "degC"),  # pint normalises °c → degreec internally
+    ("\xf8c", "degC"),    # ø variant (biologic: t/øc)
+]:
+    try:
+        _ureg.define(f"{_alias} = {_canonical}")
+    except Exception:
+        pass
 
 
 def _sniff_decimal(df: Union[pl.DataFrame, pl.LazyFrame]) -> str:
@@ -54,10 +57,18 @@ def _build_col_expr(
     schema: dict,
     decimal: str,
     all_dt_fmts: list[str],
+    dt_fmt_hint: str | None = None,
 ) -> pl.Expr:
     expr = pl.col(src_col)
     if bdf_key == "unix_time_second":
-        if all_dt_fmts:
+        if dt_fmt_hint:
+            expr = (
+                pl.col(src_col)
+                .str.to_datetime(dt_fmt_hint, strict=False)
+                .dt.timestamp("ms")
+                .cast(pl.Float64) / 1000.0
+            )
+        elif all_dt_fmts:
             expr = pl.coalesce([
                 pl.col(src_col).str.to_datetime(fmt, strict=False)
                 for fmt in all_dt_fmts
@@ -83,8 +94,8 @@ def pint_factor(source_unit: str | None, bdf_unit: str) -> float | None:
     """
     if source_unit is None or source_unit.strip() == "" or bdf_unit in ("1", ""):
         return None
-    src_str = _coerce_unit(source_unit.strip())
-    tgt_str = _coerce_unit(bdf_unit.strip())
+    src_str = source_unit.strip()
+    tgt_str = bdf_unit.strip()
     if src_str.lower() == tgt_str.lower():
         return 1.0
     try:
@@ -144,7 +155,9 @@ def normalize(
                 raise ValueError(f"column_map key {lbl!r} is not a valid BDF label")
 
     index = get_synonym_index()
-    columns = df.columns
+    dt_index = get_datetime_index()
+    _schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
+    columns = list(_schema.names())
 
     if source is None:
         source = detect_source_from_columns(columns, index)
@@ -160,11 +173,12 @@ def normalize(
     source_dt_fmts = source_spec.get("datetime_formats", [])
     global_dt_fmts = config.get("datetime_formats", [])
     source_index = index.get(source, {})
-    schema = df.schema
+    source_dt_hints = dt_index.get(source, {})
+    schema = _schema
 
     all_dt_fmts = source_dt_fmts + global_dt_fmts
     exprs: list[pl.Expr] = []
-    seen_labels: set[str] = set()
+    seen_labels: dict[str, str] = {}
     column_map_sources: set[str] = set(column_map.values()) if column_map else set()
 
     if column_map:
@@ -186,7 +200,7 @@ def normalize(
                 _build_col_expr(src_col, bdf_key, bdf_unit, dtype_str, src_unit_raw, schema, decimal, all_dt_fmts)
                 .alias(bdf_label)
             )
-            seen_labels.add(bdf_label)
+            seen_labels[bdf_label] = src_col
 
     for col in columns:
         if col in column_map_sources:
@@ -199,7 +213,7 @@ def normalize(
         bdf_key_unit = source_index.get(qty_lower) or source_index.get(col_lower)
 
         if bdf_key_unit is None:
-            exprs.append(pl.col(col))
+            _logger.info("normalize [%s] dropped (no match): '%s'", source, col)
             continue
 
         bdf_key, bdf_unit = bdf_key_unit
@@ -211,10 +225,13 @@ def normalize(
         dtype_str = col_defs[bdf_key].get("dtype", "float")
 
         if bdf_label in seen_labels:
-            # Already mapped — keep input column unchanged under original name
-            exprs.append(pl.col(col))
+            _logger.info(
+                "normalize [%s] dropped (duplicate label '%s' already claimed by '%s'): '%s'",
+                source, bdf_label, seen_labels[bdf_label], col,
+            )
             continue
-        seen_labels.add(bdf_label)
+        seen_labels[bdf_label] = col
+        _logger.info("normalize [%s] matched: '%s' → '%s'", source, col, bdf_label)
 
         metadata["columns"][bdf_label] = {
             "source_header": col,
@@ -222,8 +239,11 @@ def normalize(
             "bdf_unit": bdf_unit,
         }
 
+        dt_hint_entry = source_dt_hints.get(col_lower)
+        dt_fmt_hint = dt_hint_entry[2] if dt_hint_entry else None
+
         exprs.append(
-            _build_col_expr(col, bdf_key, bdf_unit, dtype_str, src_unit_raw, schema, decimal, all_dt_fmts)
+            _build_col_expr(col, bdf_key, bdf_unit, dtype_str, src_unit_raw, schema, decimal, all_dt_fmts, dt_fmt_hint)
             .alias(bdf_label)
         )
 

@@ -3,10 +3,16 @@
 import sys
 from pathlib import Path
 
-# Ensure bdf2 is importable from project root
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from bdf2._config import build_synonym_index, get_synonym_index, load_config
+from bdf2._config import (
+    build_synonym_index,
+    extract_qty_unit,
+    get_datetime_index,
+    get_source_regexes,
+    get_synonym_index,
+    load_config,
+)
 
 
 def test_load_config_returns_dict():
@@ -53,7 +59,6 @@ def test_source_structure():
         assert "exts" in spec, f"{sid} missing exts"
         assert "magic" in spec, f"{sid} missing magic"
         assert "qty_unit_regexes" in spec, f"{sid} missing qty_unit_regexes"
-        assert "decimal" in spec, f"{sid} missing decimal"
 
 
 def test_synonym_index_quantity_extraction():
@@ -85,7 +90,7 @@ def test_synonym_index_full_string_fallback():
 
 
 def test_synonym_index_angle_bracket():
-    """biologic_mpt '<ewe>/v' synonym → qty 'ewe' → voltage_volt."""
+    """biologic_mpt '<ewe>/V' synonym → qty 'ewe' → voltage_volt."""
     index = get_synonym_index()
     bio = index["biologic_mpt"]
     assert "ewe" in bio
@@ -114,14 +119,128 @@ def test_synonym_index_landt_csv_no_unit_fallback():
 
 def test_build_synonym_index_returns_nested_dict():
     cfg = load_config()
-    index = build_synonym_index(cfg)
+    synonym_index, _datetime_index = build_synonym_index(cfg)
     for sid in cfg["sources"]:
-        assert sid in index
-        assert isinstance(index[sid], dict)
+        assert sid in synonym_index
+        assert isinstance(synonym_index[sid], dict)
 
 
 def test_synonym_index_cached():
     """get_synonym_index returns same object on repeated calls."""
     idx1 = get_synonym_index()
     idx2 = get_synonym_index()
+    assert idx1 is idx2
+
+
+def test_synonym_unit_invariant():
+    """Every synonym whose extracted unit is non-trivially different from the BDF
+    canonical unit must be pint-equivalent to that canonical unit."""
+    import pint
+    from bdf2._normalize import _ureg
+
+    cfg = load_config()
+    source_regexes = get_source_regexes()
+    failures = []
+
+    for bdf_key, col_def in cfg["columns"].items():
+        bdf_unit = col_def["unit"]
+        if bdf_unit in ("1", ""):
+            continue
+        for source_id, synonyms in col_def.get("synonyms", {}).items():
+            regexes = source_regexes.get(source_id, [])
+            for synonym in synonyms:
+                _, unit_str = extract_qty_unit(synonym, regexes)
+                if unit_str is None:
+                    continue
+                # Case-insensitive string match — pint_factor returns 1.0 at runtime
+                if unit_str.lower() == bdf_unit.lower():
+                    continue
+                try:
+                    src = _ureg.parse_expression(unit_str)
+                    tgt = _ureg.parse_expression(bdf_unit)
+                    ratio = (src / tgt).to_base_units()
+                    if not ratio.dimensionless:
+                        failures.append(
+                            f"{bdf_key}/{source_id}/{synonym!r}: "
+                            f"unit {unit_str!r} not dimensionally equivalent to {bdf_unit!r}"
+                        )
+                except pint.errors.DimensionalityError:
+                    failures.append(
+                        f"{bdf_key}/{source_id}/{synonym!r}: "
+                        f"unit {unit_str!r} not dimensionally equivalent to {bdf_unit!r}"
+                    )
+                except Exception:
+                    # pint can't parse — skip (non-SI or unknown string)
+                    pass
+
+    assert not failures, "Synonym unit invariant violations:\n" + "\n".join(failures)
+
+
+def test_datetime_synonyms_valid_format():
+    """Every format string in datetime_synonyms must be parseable by Polars str.to_datetime."""
+    import polars as pl
+
+    cfg = load_config()
+    sentinel_map = {
+        "%Y-%m-%d %H:%M:%S%.f": "2024-01-01 00:00:00.123456",
+        "%Y-%m-%d %H:%M:%S":    "2024-01-01 00:00:00",
+        "%m/%d/%Y %H:%M:%S%.f": "01/01/2024 00:00:00.123456",
+        "%m/%d/%Y %H:%M:%S":    "01/01/2024 00:00:00",
+        "%d-%b-%y %I:%M:%S %p": "01-Jan-24 12:00:00 AM",
+        "%d-%b-%y %H:%M:%S":    "01-Jan-24 00:00:00",
+        "%Y/%m/%d %H:%M:%S":    "2024/01/01 00:00:00",
+        "%Y-%m-%dT%H:%M:%S":    "2024-01-01T00:00:00",
+    }
+
+    failures = []
+    for bdf_key, col_def in cfg["columns"].items():
+        for source_id, dt_synonyms in col_def.get("datetime_synonyms", {}).items():
+            for header, fmt in dt_synonyms.items():
+                test_str = sentinel_map.get(fmt, "2024-01-01 00:00:00")
+                try:
+                    result = pl.Series([test_str]).str.to_datetime(fmt, strict=True)
+                    if result[0] is None:
+                        raise ValueError("parsed to null")
+                except Exception as e:
+                    failures.append(
+                        f"{bdf_key}/{source_id}/{header!r}: "
+                        f"format {fmt!r} failed with {e}"
+                    )
+
+    assert not failures, "Invalid datetime format strings:\n" + "\n".join(failures)
+
+
+def test_pint_aliases_registered():
+    """Units registered via _ureg.define() must be parseable by the registry."""
+    from bdf2._normalize import _ureg
+    import pint
+
+    # These are the aliases hardcoded in _normalize.py
+    aliases = ["degc", "degreec", "\xf8c"]
+    failures = []
+    for alias in aliases:
+        try:
+            _ureg.parse_expression(alias)
+        except Exception as e:
+            failures.append(f"{alias!r}: {e}")
+
+    assert not failures, "Pint alias registration failures:\n" + "\n".join(failures)
+
+
+def test_datetime_index_neware_date():
+    """datetime_index should have 'date' → unix_time_second entry for neware_csv."""
+    dt_index = get_datetime_index()
+    assert "neware_csv" in dt_index
+    neware = dt_index["neware_csv"]
+    assert "date" in neware
+    bdf_key, bdf_unit, fmt = neware["date"]
+    assert bdf_key == "unix_time_second"
+    assert bdf_unit == "s"
+    assert fmt.startswith("%Y-%m-%d")
+
+
+def test_datetime_index_cached():
+    """get_datetime_index returns same object on repeated calls."""
+    idx1 = get_datetime_index()
+    idx2 = get_datetime_index()
     assert idx1 is idx2
