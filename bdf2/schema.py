@@ -75,8 +75,7 @@ class Syn(RootModel[str]):
             m = re.fullmatch(pattern, header, re.IGNORECASE)
             if m is None:
                 return None
-            factor = _pint_scale(m.group(1), bdf_unit)
-            return (factor, 0.0) if factor is not None else None
+            return _pint_scale(m.group(1), bdf_unit)
         return (1.0, 0.0) if self.root.strip().lower() == header.strip().lower() else None
 
     def exact_match(self, header: str) -> bool:
@@ -153,23 +152,28 @@ def _norm_unit(u: str) -> str:
 
 
 @functools.lru_cache(maxsize=256)
-def _pint_scale(src_unit: str | None, dst_unit: str) -> float | None:
-    """Return pint conversion factor src→dst, or None when incompatible/unparseable."""
+def _pint_scale(src_unit: str | None, dst_unit: str) -> tuple[float, float] | None:
+    """Return (scale, offset) for src→dst conversion, or None when incompatible/unparseable.
+
+    Handles affine conversions (e.g. °F→°C) via two-point probe: offset = f(0), scale = f(1)-f(0).
+    """
     if src_unit is None or dst_unit in ("1", "", None):
         if (src_unit is None or src_unit.strip() in ("", "1")) and dst_unit in ("1", "", None):
-            return 1.0
+            return (1.0, 0.0)
         return None
     s = _norm_unit(src_unit)
     t = _norm_unit(dst_unit)
     if s.lower() == t.lower():
-        return 1.0
+        return (1.0, 0.0)
     try:
-        src_q = _ureg.Quantity(1, s)
-        tgt_q = _ureg.Quantity(1, t)
-        if src_q.dimensionality != tgt_q.dimensionality:
+        tgt_units = _ureg.Quantity(1, t).units
+        if _ureg.Quantity(1, s).dimensionality != _ureg.Quantity(1, t).dimensionality:
             return None
-        converted = src_q.to(tgt_q.units)
-        return round(float(converted.magnitude), 15)
+        at_zero = float(_ureg.Quantity(0, s).to(tgt_units).magnitude)
+        at_one = float(_ureg.Quantity(1, s).to(tgt_units).magnitude)
+        scale = round(at_one - at_zero, 15)
+        offset = round(at_zero, 15)
+        return (scale, offset)
     except Exception:
         return None
 
@@ -234,10 +238,10 @@ def _build_expr(
     if decimal != "." and schema.get(src) in (pl.String, pl.Utf8):
         expr = expr.str.replace_all(decimal, ".", literal=True)
     expr = expr.cast(pl.Float64, strict=False)
-    if rc.offset != 0.0:
-        expr = expr + rc.offset
     if rc.scale != 1.0:
         expr = expr * rc.scale
+    if rc.offset != 0.0:
+        expr = expr + rc.offset
     if _col_dtype(mr_name) == "int":
         expr = expr.cast(pl.Int64, strict=False)
     return expr.alias(mr_name)
@@ -247,24 +251,24 @@ def _resolved_from_column_map_value(mr_name: str, src_header: str) -> ResolvedCo
     src_unit = _extract_unit(src_header)
     bdf_unit = _col_unit(mr_name)
     if src_unit is None:
-        scale = 1.0
+        scale, offset = 1.0, 0.0
     else:
-        factor = _pint_scale(src_unit, bdf_unit)
-        if factor is None:
+        result = _pint_scale(src_unit, bdf_unit)
+        if result is None:
             warnings.warn(
                 f"column_map: unit {src_unit!r} on {src_header!r} not compatible "
                 f"with {bdf_unit!r} for {mr_name}; using scale=1.0",
                 UserWarning,
                 stacklevel=4,
             )
-            scale = 1.0
+            scale, offset = 1.0, 0.0
         else:
-            scale = factor
+            scale, offset = result
     return ResolvedColumn(
         source_header=src_header,
         bdf_unit=bdf_unit,
         scale=scale,
-        offset=0.0,
+        offset=offset,
     )
 
 

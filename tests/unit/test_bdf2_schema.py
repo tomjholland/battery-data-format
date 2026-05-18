@@ -295,6 +295,24 @@ def test_normalizer_normalize_unit_conversion():
     assert out["current_ampere"][0] == pytest.approx(1.0)
 
 
+def test_normalizer_normalize_temperature_degf_to_celsius():
+    import polars as pl
+    n = Normalizer(ambient_temperature_celsius=[Syn("T/{unit}")])
+    df = pl.DataFrame({"T/degF": [32.0, 212.0]})
+    out, _ = n.normalize(df)
+    assert out["ambient_temperature_celsius"][0] == pytest.approx(0.0, abs=1e-9)
+    assert out["ambient_temperature_celsius"][1] == pytest.approx(100.0, abs=1e-9)
+
+
+def test_pint_scale_temperature_offset():
+    from bdf2.schema import _pint_scale
+    result = _pint_scale("degF", "degC")
+    assert result is not None
+    scale, offset = result
+    assert scale == pytest.approx(5 / 9, rel=1e-9)
+    assert offset == pytest.approx(-160 / 9, rel=1e-9)
+
+
 # --------------------------------------------------------------------- 4.3 ResolvedColumn.from_synonyms
 
 def test_from_synonyms_syn_match():
