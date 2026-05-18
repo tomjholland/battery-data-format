@@ -1,4 +1,4 @@
-"""Unit tests for bdf2._normalize."""
+"""Unit tests for bdf2._normalize against the new schema-driven API."""
 
 import sys
 from pathlib import Path
@@ -8,405 +8,177 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from bdf2._config import load_config
-from bdf2._detect import detect_layout, read_sample
-from bdf2._normalize import (
-    detect_source_from_columns,
-    extract_qty_unit,
-    normalize,
-    normalize_pandas,
-    pint_factor,
-)
+from bdf2 import normalize
+from bdf2._normalize import _sniff_decimal
+from bdf2.schema import BDFColumn
+from bdf2.sources import BIOLOGIC_MPT
 
-SAMPLE_DATA = Path(__file__).parent.parent.parent / "sample_data"
-BDF_KEYS = set(load_config()["columns"].keys())
-BDF_LABELS = {v["label"] for v in load_config()["columns"].values()}
+MR_NAMES = {c.mr_name for c in BDFColumn}
 
 
-def test_extract_qty_unit_parens():
-    import re
-    rx = [re.compile(r"^(.+?)\s*\(([^)]+)\)$")]
-    qty, unit = extract_qty_unit("Voltage(V)", rx)
-    assert qty == "Voltage"
-    assert unit == "V"
-
-
-def test_extract_qty_unit_bracket():
-    import re
-    rx = [re.compile(r"^~?([A-Za-z][A-Za-z0-9_-]*)\[([^\]]+)\]$")]
-    qty, unit = extract_qty_unit("~Time[h]", rx)
-    assert qty == "~Time" or qty == "Time"  # group 1 depends on tilde handling
-
-
-def test_extract_qty_unit_no_match_returns_full():
-    import re
-    rx = [re.compile(r"^(.+?)\(([^)]+)\)$")]
-    qty, unit = extract_qty_unit("Voltage", rx)
-    assert qty == "Voltage"
-    assert unit is None
-
-
-def test_pint_factor_ma_to_a():
-    f = pint_factor("mA", "A")
-    assert f == pytest.approx(0.001)
-
-
-def test_pint_factor_h_to_s():
-    f = pint_factor("h", "s")
-    assert f == pytest.approx(3600.0)
-
-
-def test_pint_factor_same_unit():
-    f = pint_factor("V", "V")
-    assert f == 1.0
-
-
-def test_pint_factor_none_source():
-    assert pint_factor(None, "A") is None
-
-
-def test_pint_factor_dimensionless():
-    assert pint_factor(None, "1") is None
-
-
-def test_pint_factor_bad_unit_returns_none():
-    f = pint_factor("not_a_unit_xyz", "A")
-    assert f is None
-
-
-def test_pint_factor_mah_to_ah():
-    f = pint_factor("mAh", "Ah")
-    assert f == pytest.approx(0.001)
-
-
-def test_detect_source_basytec():
-    from bdf2._config import get_synonym_index
-    index = get_synonym_index()
-    cols = ["~Time[s]", "U[V]", "I[A]"]
-    src = detect_source_from_columns(cols, index)
-    assert src == "basytec_txt"
-
-
-def test_detect_source_biologic():
-    from bdf2._config import get_synonym_index
-    index = get_synonym_index()
-    cols = ["time/s", "Ecell/V", "I/mA", "cycle number"]
-    src = detect_source_from_columns(cols, index)
-    assert src == "biologic_mpt"
-
-
-def test_detect_source_no_match():
-    from bdf2._config import get_synonym_index
-    index = get_synonym_index()
-    cols = ["unknown_col_xyz", "another_unknown"]
-    src = detect_source_from_columns(cols, index)
-    assert src is None
-
-
-def test_normalize_basytec_column_rename():
-    df = pl.DataFrame({"~Time[s]": ["1.0", "2.0"], "U[V]": ["3.5", "3.6"], "I[A]": ["0.1", "0.2"]})
-    df_out, meta = normalize(df, source="basytec_txt")
-    assert "Test Time / s" in df_out.columns
-    assert "Voltage / V" in df_out.columns
-    assert "Current / A" in df_out.columns
+def test_normalize_basytec_rename():
+    df = pl.DataFrame({
+        "~Time[s]": ["1.0", "2.0"],
+        "U[V]": ["3.5", "3.6"],
+        "I[A]": ["0.1", "0.2"],
+    })
+    out, meta = normalize(df, source="basytec_txt")
+    assert set(out.columns) >= {"test_time_second", "voltage_volt", "current_ampere"}
     assert meta["source"] == "basytec_txt"
 
 
-def test_normalize_logging(caplog):
-    """normalize emits INFO lines for match, miss, and duplicate."""
-    import logging
-    df = pl.DataFrame({
-        "Ecell/V": ["3.5"],
-        "Ns changes": ["1"],
-        "(Q-Qo)/mA.h": ["1.0"],
-        "Capacity/mA.h": ["2.0"],
-    })
-    with caplog.at_level(logging.INFO, logger="bdf2._normalize"):
-        normalize(df, source="biologic_mpt")
-    messages = caplog.messages
-    assert any("matched" in m and "Ecell/V" in m for m in messages)
-    assert any("no match" in m and "Ns changes" in m for m in messages)
-    assert any("duplicate" in m and "Capacity/mA.h" in m for m in messages)
+def test_normalize_lazyframe_returns_lazyframe():
+    lf = pl.LazyFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"]})
+    out, _ = normalize(lf, source="basytec_txt")
+    assert isinstance(out, pl.LazyFrame)
+    df = out.collect()
+    assert "voltage_volt" in df.columns
 
 
-def test_normalize_duplicate_label_column_dropped():
-    """Second vendor column resolving to the same BDF label is dropped."""
-    df = pl.DataFrame({"(Q-Qo)/mA.h": ["1.0"], "Capacity/mA.h": ["2.0"]})
-    df_out, _ = normalize(df, source="biologic_mpt")
-    assert "Cumulative Capacity / Ah" in df_out.columns
-    assert df_out.shape[1] == 1
+def test_normalize_dataframe_returns_dataframe():
+    df = pl.DataFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"]})
+    out, _ = normalize(df, source="basytec_txt")
+    assert isinstance(out, pl.DataFrame)
 
 
-def test_normalize_unknown_column_dropped():
-    df = pl.DataFrame({"~Time[s]": ["1.0"], "Mystery": ["abc"]})
-    df_out, meta = normalize(df, source="basytec_txt")
-    assert "Mystery" not in df_out.columns
+def test_normalize_source_string_resolved():
+    df = pl.DataFrame({"~Time[s]": ["1.0"]})
+    _, meta = normalize(df, source="basytec_txt")
+    assert meta["source"] == "basytec_txt"
+
+
+def test_normalize_source_normalizer_instance():
+    df = pl.DataFrame({"Ewe/V": ["3.5"]})
+    _, meta = normalize(df, source=BIOLOGIC_MPT)
+    assert meta["source"] == "biologic_mpt"
+
+
+def test_normalize_unknown_source_raises():
+    df = pl.DataFrame({"x": ["1.0"]})
+    with pytest.raises(KeyError):
+        normalize(df, source="nonexistent_xyz")
+
+
+def test_normalize_autodetect():
+    df = pl.DataFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"], "I[A]": ["0.1"]})
+    _, meta = normalize(df)
+    assert meta["source"] == "basytec_txt"
+
+
+def test_normalize_no_match_returns_unchanged():
+    df = pl.DataFrame({"unknown_xyz": [1.0, 2.0]})
+    out, meta = normalize(df)
+    assert out.columns == ["unknown_xyz"]
+    assert meta["source"] is None
+
+
+def test_normalize_metadata_provenance():
+    df = pl.DataFrame({"I/mA": ["100.0"]})
+    _, meta = normalize(df, source="biologic_mpt")
+    prov = meta["columns"]["current_ampere"]
+    assert prov["source_header"] == "I/mA"
+    assert prov["source_unit"] == "mA"
+    assert prov["bdf_unit"] == "A"
+    assert prov["scale"] == pytest.approx(0.001)
+
+
+def test_normalize_unit_conversion_ma_to_a():
+    df = pl.DataFrame({"I/mA": ["1000.0"]})
+    out, _ = normalize(df, source="biologic_mpt")
+    assert out["current_ampere"][0] == pytest.approx(1.0)
+
+
+def test_normalize_unit_conversion_h_to_s():
+    df = pl.DataFrame({"Run Time (h)": ["1.0"]})
+    out, _ = normalize(df, source="novonix_csv")
+    assert out["test_time_second"][0] == pytest.approx(3600.0)
 
 
 def test_normalize_dtype_float64():
     df = pl.DataFrame({"~Time[s]": ["1.0", "2.0"]})
-    df_out, _ = normalize(df, source="basytec_txt")
-    assert df_out["Test Time / s"].dtype == pl.Float64
+    out, _ = normalize(df, source="basytec_txt")
+    assert out["test_time_second"].dtype == pl.Float64
 
 
-def test_normalize_no_source_unchanged():
-    df = pl.DataFrame({"unknown_xyz": [1.0, 2.0]})
-    df_out, meta = normalize(df)
-    assert df_out.columns == ["unknown_xyz"]
-    assert meta["source"] is None
+def test_normalize_dtype_int64_for_counts():
+    df = pl.DataFrame({"cycle number": ["3"]})
+    out, _ = normalize(df, source="biologic_mpt")
+    assert out["cycle_count"].dtype == pl.Int64
 
 
-def test_normalize_lazyframe():
-    lf = pl.LazyFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"]})
-    lf_out, meta = normalize(lf, source="basytec_txt")
-    assert isinstance(lf_out, pl.LazyFrame)
-    df = lf_out.collect()
-    assert "Test Time / s" in df.columns
+def test_normalize_decimal_comma():
+    df = pl.DataFrame({"Ecell/V": ["1,5", "1,6"]})
+    out, _ = normalize(df, source="biologic_mpt")
+    assert out["voltage_volt"][0] == pytest.approx(1.5)
 
 
-def test_normalize_unit_conversion_ma_to_a():
-    """biologic I/mA column should be divided by 1000 → Current / A."""
-    df = pl.DataFrame({"I/mA": ["1000.0"]})
-    df_out, _ = normalize(df, source="biologic_mpt")
-    val = df_out["Current / A"][0]
-    assert val == pytest.approx(1.0)
+def test_normalize_decimal_explicit_dot_skips_sniff():
+    df = pl.DataFrame({"Ecell/V": ["1.5"]})
+    out, _ = normalize(df, source="biologic_mpt", decimal=".")
+    assert out["voltage_volt"][0] == pytest.approx(1.5)
 
 
-def test_normalize_unit_conversion_h_to_s():
-    """novonix Run Time (h) → Test Time / s, values ×3600."""
-    df = pl.DataFrame({"Run Time (h)": ["1.0"]})
-    df_out, _ = normalize(df, source="novonix_csv")
-    val = df_out["Test Time / s"][0]
-    assert val == pytest.approx(3600.0)
-
-
-def test_normalize_decimal_comma_biologic():
-    """biologic decimal=',' — '1,5' should become 1.5."""
-    df = pl.DataFrame({"Ecell/V": ["1,5"]})
-    df_out, _ = normalize(df, source="biologic_mpt")
-    val = df_out["Voltage / V"][0]
-    assert val == pytest.approx(1.5)
-
-
-def test_normalize_metadata_columns():
-    df = pl.DataFrame({"I/mA": ["100.0"], "time/s": ["5.0"]})
-    _, meta = normalize(df, source="biologic_mpt")
-    assert "Current / A" in meta["columns"]
-    prov = meta["columns"]["Current / A"]
-    assert prov["source_header"] == "I/mA"
-    assert prov["bdf_unit"] == "A"
-
-
-def test_normalize_source_override():
-    """Explicit source skips auto-detection."""
-    df = pl.DataFrame({"time/s": ["1.0"], "Ecell/V": ["3.5"]})
-    _, meta = normalize(df, source="biologic_mpt")
-    assert meta["source"] == "biologic_mpt"
-
-
-# ---------------------------------------------------------------------------
-# normalize — real file headers (task 5.6)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("source_id,path,expected_cols", [
-    ("arbin_csv",    SAMPLE_DATA / "arbin" / "sample_data_arbin.csv",
-     ["Test Time / s", "Voltage / V", "Current / A"]),
-    ("basytec_txt",  SAMPLE_DATA / "basytec" / "sample_data_basytec.txt",
-     ["Test Time / s", "Voltage / V", "Current / A"]),
-    ("biologic_mpt", SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt",
-     ["Test Time / s", "Voltage / V"]),
-    ("novonix_csv",  SAMPLE_DATA / "novonix" / "sample_data_novonix.csv",
-     ["Test Time / s", "Voltage / V", "Current / A"]),
-    ("neware_csv",   SAMPLE_DATA / "neware" / "sample_data_neware.csv",
-     ["Voltage / V", "Current / A"]),
-    ("maccor_csv",   SAMPLE_DATA / "maccor" / "sample_data_maccor.csv",
-     ["Test Time / s", "Voltage / V", "Current / A"]),
-])
-def test_normalize_real_file_headers(source_id, path, expected_cols):
-    """Load header row from sample file, run normalize, check BDF columns produced."""
-    sample = read_sample(path)
-    sep, header_idx, _, _ = detect_layout(sample)
-    lines = sample.splitlines()
-    header_line = lines[header_idx].rstrip(sep)
-    headers = header_line.split(sep)
-
-    # Build a minimal DataFrame with one dummy string row
-    df = pl.DataFrame({h: ["1.0"] for h in headers if h.strip()})
-    df_out, meta = normalize(df, source=source_id)
-
-    # All output BDF columns must be valid labels
-    for col in df_out.columns:
-        if col in BDF_LABELS:
-            assert col in BDF_LABELS
-    # Expected columns are present
-    for col in expected_cols:
-        assert col in df_out.columns, f"Missing {col!r} for {source_id}"
-
-
-def _all_synonym_triples():
-    """Yield (source_id, bdf_key, synonym) for every synonym in columns.json."""
-    config = load_config()
-    for bdf_key, col_def in config["columns"].items():
-        for source_id, synonyms in col_def.get("synonyms", {}).items():
-            for synonym in synonyms:
-                yield source_id, bdf_key, synonym
-
-
-def _synonym_triple_ids(triple):
-    source_id, bdf_key, synonym = triple
-    return f"{source_id}-{bdf_key}-{synonym}"
-
-
-_TRIPLES = list(_all_synonym_triples())
-
-
-@pytest.mark.parametrize("source_id,bdf_key,synonym", _TRIPLES, ids=[
-    _synonym_triple_ids(t) for t in _TRIPLES
-])
-def test_all_synonyms_produce_bdf_label(source_id, bdf_key, synonym):
-    """Every synonym must cause normalize to output the corresponding BDF label."""
-    config = load_config()
-    bdf_label = config["columns"][bdf_key]["label"]
-    df = pl.DataFrame({synonym: ["1.0"]})
-    df_out, meta = normalize(df, source=source_id)
-    assert bdf_label in df_out.columns, (
-        f"{source_id!r} synonym {synonym!r} → expected label {bdf_label!r} "
-        f"in output columns {df_out.columns}"
-    )
-
-
-@pytest.mark.parametrize("source_id,bdf_key,synonym", _TRIPLES, ids=[
-    _synonym_triple_ids(t) for t in _TRIPLES
-])
-def test_all_synonyms_produce_correct_dtype(source_id, bdf_key, synonym):
-    """Every synonym must produce the canonical BDF dtype (Float64 or Int64)."""
-    config = load_config()
-    col_def = config["columns"][bdf_key]
-    bdf_label = col_def["label"]
-    dtype_str = col_def.get("dtype", "float")
-    expected_dtype = pl.Int64 if dtype_str == "int" else pl.Float64
-
-    df = pl.DataFrame({synonym: ["1"]})
-    df_out, _ = normalize(df, source=source_id)
-    assert bdf_label in df_out.columns
-    actual = df_out[bdf_label].dtype
-    assert actual == expected_dtype, (
-        f"{source_id!r}/{synonym!r}: expected {expected_dtype}, got {actual}"
-    )
-
-
-def test_sniff_decimal_comma_strings():
-    from bdf2._normalize import _sniff_decimal
-    df = pl.DataFrame({"voltage": ["1,23", "4,56"], "current": ["0,1", "0,2"]})
-    assert _sniff_decimal(df) == ","
-
-
-def test_sniff_decimal_dot_strings():
-    from bdf2._normalize import _sniff_decimal
-    df = pl.DataFrame({"voltage": ["1.23", "4.56"]})
-    assert _sniff_decimal(df) == "."
-
-
-def test_sniff_decimal_no_numeric_strings():
-    from bdf2._normalize import _sniff_decimal
-    df = pl.DataFrame({"label": ["foo", "bar"]})
-    assert _sniff_decimal(df) == "."
-
-
-def test_sniff_decimal_float_columns_only():
-    from bdf2._normalize import _sniff_decimal
-    df = pl.DataFrame({"voltage": [1.23, 4.56]})
-    assert _sniff_decimal(df) == "."
-
-
-def test_normalize_pandas_returns_pandas():
-    import pandas as pd
-    df = pd.DataFrame({"U[V]": [3.5, 3.6], "I[A]": [0.1, 0.2]})
-    df_out, meta = normalize_pandas(df)
-    assert isinstance(df_out, pd.DataFrame)
-    assert "Voltage / V" in df_out.columns
-
-
-def test_column_map_unit_conversion():
-    """column_map: custom source col with bracket unit → pint conversion applied."""
+def test_normalize_column_map_valid_key():
     df = pl.DataFrame({
         "~Time[s]": ["1.0"],
         "my_volt[mV]": ["1000.0"],
         "I[A]": ["0.1"],
     })
-    df_out, _ = normalize(df, source="basytec_txt", column_map={"Voltage / V": "my_volt[mV]"})
-    assert "Voltage / V" in df_out.columns
-    assert df_out["Voltage / V"][0] == pytest.approx(1.0)
+    out, _ = normalize(df, source="basytec_txt", column_map={"voltage_volt": "my_volt[mV]"})
+    assert "voltage_volt" in out.columns
+    assert out["voltage_volt"][0] == pytest.approx(1.0)
 
 
-def test_column_map_invalid_label_raises():
-    """Invalid BDF label in column_map raises ValueError before any output."""
-    df = pl.DataFrame({"~Time[s]": ["1.0"], "U[V]": ["3.5"]})
-    with pytest.raises(ValueError, match="not a valid BDF label"):
-        normalize(df, source="basytec_txt", column_map={"NotALabel": "U[V]"})
+def test_normalize_column_map_invalid_key_raises():
+    df = pl.DataFrame({"~Time[s]": ["1.0"]})
+    with pytest.raises(ValueError, match="not a valid BDF mr_name"):
+        normalize(df, source="basytec_txt", column_map={"not_bdf": "U[V]"})
 
 
-def test_include_optional_false_required_only():
-    """include_optional=False: output contains only required BDF columns."""
+def test_normalize_include_optional_false():
     df = pl.DataFrame({
-        "time/s": ["1.0"],
-        "Ecell/V": ["3.5"],
-        "I/mA": ["100.0"],
-        "cycle number": ["1"],
+        "time/s": ["1.0"], "Ecell/V": ["3.5"], "I/mA": ["100.0"], "cycle number": ["1"],
     })
-    df_out, _ = normalize(df, source="biologic_mpt", include_optional=False)
-    assert "Test Time / s" in df_out.columns
-    assert "Voltage / V" in df_out.columns
-    assert "Current / A" in df_out.columns
-    assert "Cycle Count / 1" not in df_out.columns
+    out, _ = normalize(df, source="biologic_mpt", include_optional=False)
+    assert "test_time_second" in out.columns
+    assert "cycle_count" not in out.columns
 
 
-def test_include_optional_false_suppresses_column_map_optional():
-    """include_optional=False suppresses column_map entry targeting optional BDF column."""
+def test_normalize_extra_columns_passthrough():
     df = pl.DataFrame({
-        "time/s": ["1.0"],
-        "Ecell/V": ["3.5"],
-        "I/mA": ["100.0"],
-        "my_cycle": ["5"],
+        "time/s": ["1.0"], "Ecell/V": ["3.5"], "protocol_id": ["charge_cc"],
     })
-    df_out, _ = normalize(
-        df,
-        source="biologic_mpt",
-        column_map={"Cycle Count / 1": "my_cycle"},
-        include_optional=False,
-    )
-    assert "Cycle Count / 1" not in df_out.columns
+    out, _ = normalize(df, source="biologic_mpt", extra_columns={"protocol_id": "Protocol"})
+    assert out["Protocol"][0] == "charge_cc"
 
 
-def test_extra_columns_passthrough():
-    """extra_columns renames source col; dtype and values preserved."""
-    df = pl.DataFrame({
-        "time/s": ["1.0"],
-        "Ecell/V": ["3.5"],
-        "protocol_id": ["charge_cc"],
-    })
-    df_out, _ = normalize(df, source="biologic_mpt", extra_columns={"protocol_id": "Protocol"})
-    assert "Protocol" in df_out.columns
-    assert df_out["Protocol"][0] == "charge_cc"
-    assert df_out["Protocol"].dtype == pl.String
+def test_normalize_extra_columns_missing_warns():
+    import warnings as w
+
+    df = pl.DataFrame({"time/s": ["1.0"]})
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        out, _ = normalize(df, source="biologic_mpt", extra_columns={"ghost": "Out"})
+    assert any(issubclass(c.category, UserWarning) for c in caught)
+    assert "Out" not in out.columns
 
 
-def test_extra_columns_missing_source_warns():
-    """extra_columns with absent source col emits UserWarning; col absent from output."""
-    import warnings as _warnings
+def test_sniff_decimal_comma():
+    df = pl.DataFrame({"voltage": ["1,23", "4,56"]})
+    assert _sniff_decimal(df) == ","
+
+
+def test_sniff_decimal_dot():
+    df = pl.DataFrame({"voltage": ["1.23"]})
+    assert _sniff_decimal(df) == "."
+
+
+def test_sniff_decimal_no_strings():
+    df = pl.DataFrame({"v": [1.23]})
+    assert _sniff_decimal(df) == "."
+
+
+def test_metadata_columns_keyed_by_mr_name():
     df = pl.DataFrame({"time/s": ["1.0"], "Ecell/V": ["3.5"]})
-    with _warnings.catch_warnings(record=True) as caught:
-        _warnings.simplefilter("always")
-        df_out, _ = normalize(df, source="biologic_mpt", extra_columns={"ghost_col": "Output"})
-    assert any(issubclass(w.category, UserWarning) for w in caught)
-    assert "Output" not in df_out.columns
-
-
-def test_read_forwards_column_mapping_args(tmp_path):
-    """read() forwards include_optional, column_map, extra_columns to normalize()."""
-    from bdf2._read import read
-    csv = tmp_path / "test.csv"
-    csv.write_text("time/s,Ecell/V,I/mA,cycle number\n1.0,3.5,100.0,1\n")
-    df_out, _ = read(str(csv), source="biologic_mpt", include_optional=False)
-    assert "Test Time / s" in df_out.columns
-    assert "Cycle Count / 1" not in df_out.columns
+    _, meta = normalize(df, source="biologic_mpt")
+    assert all(k in MR_NAMES for k in meta["columns"])

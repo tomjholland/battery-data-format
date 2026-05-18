@@ -1,255 +1,195 @@
-"""Column mapping, unit conversion, and type coercion."""
+"""Column mapping, unit conversion, and type coercion driven by Normalizer instances."""
 
 from __future__ import annotations
 
 import logging
 import warnings
-from typing import Union
 
 import polars as pl
-import pint
 
-from ._config import (
-    extract_qty_unit,
-    get_datetime_index,
-    get_source_regexes,
-    get_synonym_index,
-    load_config,
+from .schema import (
+    BDFColumn,
+    Normalizer,
+    ResolvedColumn,
+    Style,
+    _norm_unit,
+    _parse_styled,
+    _pint_scale,
 )
+from .sources import REGISTRY, get_normalizer
 
-_ureg = pint.UnitRegistry()
 _logger = logging.getLogger(__name__)
-
-# Register unit strings that cycler files use but pint does not know natively.
-for _alias, _canonical in [
-    ("degc", "degC"),     # basytec/biologic/digatron write lower-case degc
-    ("degreec", "degC"),  # pint normalises °c → degreec internally
-    ("\xf8c", "degC"),    # ø variant (biologic: t/øc)
-]:
-    try:
-        _ureg.define(f"{_alias} = {_canonical}")
-    except Exception:
-        pass
+_MR_TO_COL: dict[str, BDFColumn] = {c.mr_name: c for c in BDFColumn}
 
 
-def _sniff_decimal(df: Union[pl.DataFrame, pl.LazyFrame]) -> str:
+def _sniff_decimal(df: pl.DataFrame | pl.LazyFrame) -> str:
     """Return ',' if comma-decimal strings dominate string columns, else '.'."""
-    if isinstance(df, pl.LazyFrame):
-        sample = df.head(1000).collect()
-    else:
-        sample = df.head(1000)
+    sample = df.head(1000).collect() if isinstance(df, pl.LazyFrame) else df.head(1000)
 
     comma = dot = 0
     for col in sample.columns:
         if sample[col].dtype in (pl.String, pl.Utf8):
-            comma += sample[col].str.count_matches(r'\d+,\d+').sum()
-            dot += sample[col].str.count_matches(r'\d+\.\d+').sum()
+            comma += sample[col].str.count_matches(r"\d+,\d+").sum()
+            dot += sample[col].str.count_matches(r"\d+\.\d+").sum()
 
     return "," if comma > dot else "."
 
 
-def _build_col_expr(
-    src_col: str,
-    bdf_key: str,
-    bdf_unit: str,
-    dtype_str: str,
-    src_unit_raw: str | None,
+def _resolved_from_column_map_value(col: BDFColumn, src_header: str) -> ResolvedColumn:
+    """Build a ResolvedColumn for a column_map override by parsing src_header for units."""
+    src_unit: str | None = None
+    for style, _qty, unit in _parse_styled(src_header):
+        if style != Style.NONE and unit is not None:
+            src_unit = unit
+            break
+    if src_unit is None:
+        scale = 1.0
+    else:
+        factor = _pint_scale(src_unit, col.unit)
+        if factor is None:
+            warnings.warn(
+                f"column_map: unit {src_unit!r} on {src_header!r} not compatible "
+                f"with {col.unit!r} for {col.mr_name}; using scale=1.0",
+                UserWarning,
+                stacklevel=3,
+            )
+            scale = 1.0
+        else:
+            scale = factor
+    return ResolvedColumn(
+        source_header=src_header,
+        bdf_unit=col.unit,
+        scale=scale,
+        offset=0.0,
+        datetime_fmt=None,
+    )
+
+
+def _build_expr(
+    col: BDFColumn,
+    rc: ResolvedColumn,
     schema: dict,
     decimal: str,
-    all_dt_fmts: list[str],
-    dt_fmt_hint: str | None = None,
 ) -> pl.Expr:
-    expr = pl.col(src_col)
-    if bdf_key == "unix_time_second":
-        if dt_fmt_hint:
-            expr = (
-                pl.col(src_col)
-                .str.to_datetime(dt_fmt_hint, strict=False)
-                .dt.timestamp("ms")
-                .cast(pl.Float64) / 1000.0
-            )
-        elif all_dt_fmts:
-            expr = pl.coalesce([
-                pl.col(src_col).str.to_datetime(fmt, strict=False)
-                for fmt in all_dt_fmts
-            ]).dt.timestamp("ms").cast(pl.Float64) / 1000.0
-        else:
-            expr = expr.cast(pl.Float64, strict=False)
-    else:
-        if decimal != "." and schema.get(src_col) in (pl.String, pl.Utf8):
-            expr = expr.str.replace_all(decimal, ".", literal=True)
-        expr = expr.cast(pl.Float64, strict=False)
-        factor = pint_factor(src_unit_raw, bdf_unit)
-        if factor is not None and factor != 1.0:
-            expr = expr * factor
-        if dtype_str == "int":
-            expr = expr.cast(pl.Int64, strict=False)
-    return expr
+    """Construct the polars expression that produces the BDF column from rc.source_header."""
+    src = rc.source_header
+    if rc.datetime_fmt is not None:
+        expr = (
+            pl.col(src)
+            .str.to_datetime(rc.datetime_fmt, strict=False)
+            .dt.timestamp("ms")
+            .cast(pl.Float64) / 1000.0
+        )
+        return expr.alias(col.mr_name)
+    expr = pl.col(src)
+    if decimal != "." and schema.get(src) in (pl.String, pl.Utf8):
+        expr = expr.str.replace_all(decimal, ".", literal=True)
+    expr = expr.cast(pl.Float64, strict=False)
+    if rc.offset != 0.0:
+        expr = expr + rc.offset
+    if rc.scale != 1.0:
+        expr = expr * rc.scale
+    if col.dtype == "int":
+        expr = expr.cast(pl.Int64, strict=False)
+    return expr.alias(col.mr_name)
 
 
-def pint_factor(source_unit: str | None, bdf_unit: str) -> float | None:
-    """
-    Scalar conversion factor from source_unit to bdf_unit.
-    Returns None if units are incompatible or unparseable.
-    """
-    if source_unit is None or source_unit.strip() == "" or bdf_unit in ("1", ""):
-        return None
-    src_str = source_unit.strip()
-    tgt_str = bdf_unit.strip()
-    if src_str.lower() == tgt_str.lower():
-        return 1.0
-    try:
-        src = _ureg.parse_expression(src_str)
-        tgt = _ureg.parse_expression(tgt_str)
-        factor = float((src / tgt).to_base_units().magnitude)
-        return round(factor, 15)
-    except Exception as exc:
-        warnings.warn(f"unit conversion failed ({source_unit!r} → {bdf_unit!r}): {exc}")
-        return None
-
-
-def detect_source_from_columns(
-    columns: list[str],
-    index: dict[str, dict[str, tuple[str, str]]],
-) -> str | None:
-    """Score each source by synonym hits; return the highest-scoring source."""
-    best_source = None
+def _detect_source(headers: list[str]) -> Normalizer | None:
+    best: Normalizer | None = None
     best_score = 0
-
-    source_regexes = get_source_regexes()
-    for source_id, source_index in index.items():
-        regexes = source_regexes.get(source_id, [])
-        score = 0
-        for col in columns:
-            col_lower = col.lower()
-            qty, _ = extract_qty_unit(col_lower, regexes)
-            if qty in source_index or col_lower in source_index:
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_source = source_id
-
-    return best_source if best_score > 0 else None
+    for n in REGISTRY:
+        sc = n.score(headers)
+        if sc > best_score:
+            best = n
+            best_score = sc
+    return best
 
 
 def normalize(
-    df: Union[pl.DataFrame, pl.LazyFrame],
-    source: str | None = None,
+    df: pl.DataFrame | pl.LazyFrame,
+    source: str | Normalizer | None = None,
     *,
-    column_map: dict[str, str] | None = None,
     include_optional: bool = True,
+    column_map: dict[str, str] | None = None,
     extra_columns: dict[str, str] | None = None,
-) -> tuple[Union[pl.DataFrame, pl.LazyFrame], dict]:
-    """
-    Map vendor columns to BDF canonical names with unit conversion and dtype casting.
+    decimal: str | None = None,
+) -> tuple[pl.DataFrame | pl.LazyFrame, dict]:
+    """Map vendor columns to BDF canonical names with unit conversion and dtype casting.
 
-    Returns (df_out, metadata) where metadata has "source" and "columns" provenance.
+    Returns ``(df_out, metadata)`` where ``metadata`` carries ``"source"`` (the id of
+    the resolved Normalizer or ``None``) and ``"columns"`` (per-BDF-column provenance
+    keyed by ``mr_name``).
     """
-    config = load_config()
-    col_defs = config["columns"]
-    label_to_key: dict[str, str] = {v["label"]: k for k, v in col_defs.items()}
-
     if column_map:
-        for lbl in column_map:
-            if lbl not in label_to_key:
-                raise ValueError(f"column_map key {lbl!r} is not a valid BDF label")
+        for k in column_map:
+            if k not in _MR_TO_COL:
+                raise ValueError(f"column_map key {k!r} is not a valid BDF mr_name")
 
-    index = get_synonym_index()
-    dt_index = get_datetime_index()
-    _schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
-    columns = list(_schema.names())
+    schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
+    headers = list(schema.names())
 
-    if source is None:
-        source = detect_source_from_columns(columns, index)
+    norm: Normalizer | None
+    if isinstance(source, Normalizer):
+        norm = source
+    elif isinstance(source, str):
+        norm = get_normalizer(source)
+    else:
+        norm = _detect_source(headers)
 
-    metadata: dict = {"source": source, "columns": {}}
+    metadata: dict = {"source": norm.id if norm is not None else None, "columns": {}}
 
-    if source is None:
+    if norm is None and not column_map and not extra_columns:
         return df, metadata
 
-    source_spec = config["sources"].get(source, {})
-    regexes = get_source_regexes().get(source, [])
-    decimal = _sniff_decimal(df)
-    source_dt_fmts = source_spec.get("datetime_formats", [])
-    global_dt_fmts = config.get("datetime_formats", [])
-    source_index = index.get(source, {})
-    source_dt_hints = dt_index.get(source, {})
-    schema = _schema
-
-    all_dt_fmts = source_dt_fmts + global_dt_fmts
-    exprs: list[pl.Expr] = []
-    seen_labels: dict[str, str] = {}
-    column_map_sources: set[str] = set(column_map.values()) if column_map else set()
+    resolved: dict[BDFColumn, ResolvedColumn] = (
+        norm.resolve(headers) if norm is not None else {}
+    )
 
     if column_map:
-        for bdf_label, src_col in column_map.items():
-            bdf_key = label_to_key[bdf_label]
-            if not include_optional and col_defs[bdf_key].get("required") is False:
-                continue
-            bdf_unit = col_defs[bdf_key]["unit"]
-            dtype_str = col_defs[bdf_key].get("dtype", "float")
-            _, src_unit_raw = extract_qty_unit(src_col, regexes)
+        for mr_name, src_header in column_map.items():
+            col = _MR_TO_COL[mr_name]
+            resolved[col] = _resolved_from_column_map_value(col, src_header)
 
-            metadata["columns"][bdf_label] = {
-                "source_header": src_col,
-                "source_unit": src_unit_raw,
-                "bdf_unit": bdf_unit,
-            }
+    if not include_optional:
+        resolved = {c: r for c, r in resolved.items() if c.required}
 
-            exprs.append(
-                _build_col_expr(src_col, bdf_key, bdf_unit, dtype_str, src_unit_raw, schema, decimal, all_dt_fmts)
-                .alias(bdf_label)
-            )
-            seen_labels[bdf_label] = src_col
+    if decimal is None:
+        decimal = _sniff_decimal(df)
 
-    for col in columns:
-        if col in column_map_sources:
+    exprs: list[pl.Expr] = []
+    seen_mr_names: set[str] = set()
+
+    for col, rc in resolved.items():
+        if col.mr_name in seen_mr_names:
             continue
-
-        col_lower = col.lower()
-        qty_raw, src_unit_raw = extract_qty_unit(col, regexes)
-        qty_lower = qty_raw.lower()
-
-        bdf_key_unit = source_index.get(qty_lower) or source_index.get(col_lower)
-
-        if bdf_key_unit is None:
-            _logger.info("normalize [%s] dropped (no match): '%s'", source, col)
+        if not include_optional and not col.required:
             continue
-
-        bdf_key, bdf_unit = bdf_key_unit
-
-        if not include_optional and col_defs[bdf_key].get("required") is False:
-            continue
-
-        bdf_label = col_defs[bdf_key]["label"]
-        dtype_str = col_defs[bdf_key].get("dtype", "float")
-
-        if bdf_label in seen_labels:
+        if rc.source_header not in headers:
             _logger.info(
-                "normalize [%s] dropped (duplicate label '%s' already claimed by '%s'): '%s'",
-                source, bdf_label, seen_labels[bdf_label], col,
+                "normalize: column_map source %r not present in DataFrame; skipping",
+                rc.source_header,
             )
             continue
-        seen_labels[bdf_label] = col
-        _logger.info("normalize [%s] matched: '%s' → '%s'", source, col, bdf_label)
-
-        metadata["columns"][bdf_label] = {
-            "source_header": col,
-            "source_unit": src_unit_raw,
-            "bdf_unit": bdf_unit,
+        seen_mr_names.add(col.mr_name)
+        src_unit: str | None = None
+        if rc.datetime_fmt is None:
+            for style, _qty, unit in _parse_styled(rc.source_header):
+                if style != Style.NONE and unit is not None:
+                    src_unit = _norm_unit(unit)
+                    break
+        metadata["columns"][col.mr_name] = {
+            "source_header": rc.source_header,
+            "source_unit": src_unit,
+            "bdf_unit": rc.bdf_unit,
+            "scale": rc.scale,
+            "offset": rc.offset,
+            "datetime_fmt": rc.datetime_fmt,
         }
-
-        dt_hint_entry = source_dt_hints.get(col_lower)
-        dt_fmt_hint = dt_hint_entry[2] if dt_hint_entry else None
-
-        exprs.append(
-            _build_col_expr(col, bdf_key, bdf_unit, dtype_str, src_unit_raw, schema, decimal, all_dt_fmts, dt_fmt_hint)
-            .alias(bdf_label)
-        )
+        exprs.append(_build_expr(col, rc, dict(schema), decimal))
 
     if extra_columns:
         for src, out in extra_columns.items():
-            if src not in columns:
+            if src not in headers:
                 warnings.warn(
                     f"extra_columns source {src!r} not in DataFrame columns; skipping",
                     UserWarning,
@@ -258,12 +198,8 @@ def normalize(
                 continue
             exprs.append(pl.col(src).alias(out))
 
+    if not exprs:
+        return df, metadata
+
     df_out = df.select(exprs)
     return df_out, metadata
-
-
-def normalize_pandas(df) -> tuple:
-    """Convenience wrapper: pandas DataFrame → normalize → pandas DataFrame."""
-    pl_df = pl.from_pandas(df)
-    pl_out, meta = normalize(pl_df)
-    return pl_out.to_pandas(), meta

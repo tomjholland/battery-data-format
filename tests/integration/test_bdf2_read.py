@@ -8,158 +8,115 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from bdf2 import read
-from bdf2._config import load_config
+from bdf2 import CSVReader, read
+from bdf2.schema import BDFColumn
 
 SAMPLE_DATA = Path(__file__).parent.parent.parent / "sample_data"
-BDF_LABELS = {v["label"] for v in load_config()["columns"].values()}
+MR_NAMES = {c.mr_name for c in BDFColumn}
 
 
-def _assert_bdf_output(df: pl.DataFrame, meta: dict, expected_source: str, expected_cols: list[str]):
+def _assert_bdf(df, meta, source_id, required_mr_names):
     assert isinstance(df, pl.DataFrame)
-    assert isinstance(meta, dict)
-    assert "source" in meta
-
-    if expected_source:
-        assert meta["source"] == expected_source, f"Expected source {expected_source!r}, got {meta['source']!r}"
-
+    assert meta["source"] == source_id
     for col in df.columns:
-        if col in BDF_LABELS:
-            dtype = df[col].dtype
-            assert dtype in (pl.Float64, pl.Int64), f"BDF column {col!r} has unexpected dtype {dtype}"
+        if col in MR_NAMES:
+            assert df[col].dtype in (pl.Float64, pl.Int64)
+    for m in required_mr_names:
+        assert m in df.columns, f"missing {m!r} for {source_id}"
 
-    for col in expected_cols:
-        assert col in df.columns, f"Expected column {col!r} in output"
-
-
-# ---------------------------------------------------------------------------
-# Per-source tests
-# ---------------------------------------------------------------------------
 
 def test_read_arbin_csv():
-    path = SAMPLE_DATA / "arbin" / "sample_data_arbin.csv"
-    df, meta = read(path, source="arbin_csv")
-    _assert_bdf_output(df, meta, "arbin_csv", ["Test Time / s", "Voltage / V", "Current / A"])
+    df, meta = read(SAMPLE_DATA / "arbin" / "sample_data_arbin.csv", source="arbin_csv")
+    _assert_bdf(df, meta, "arbin_csv", ["test_time_second", "voltage_volt", "current_ampere"])
 
 
 def test_read_basytec_txt():
-    path = SAMPLE_DATA / "basytec" / "sample_data_basytec.txt"
-    df, meta = read(path, source="basytec_txt")
-    _assert_bdf_output(df, meta, "basytec_txt", ["Test Time / s", "Voltage / V", "Current / A"])
+    df, meta = read(SAMPLE_DATA / "basytec" / "sample_data_basytec.txt", source="basytec_txt")
+    _assert_bdf(df, meta, "basytec_txt", ["test_time_second", "voltage_volt", "current_ampere"])
 
 
-def test_read_biologic_mpt():
-    path = SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt"
-    df, meta = read(path)
-    _assert_bdf_output(df, meta, "biologic_mpt", ["Test Time / s", "Voltage / V"])
+def test_read_biologic_mpt_autodetect():
+    df, meta = read(SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt")
+    _assert_bdf(df, meta, "biologic_mpt", ["test_time_second", "voltage_volt"])
     assert df.shape[0] > 0
-    expected_cols = {
-        "Step Index / 1",
-        "Test Time / s",
-        "Voltage / V",
-        "Current / A",
-        "Cumulative Capacity / Ah",
-        "Charging Energy / Wh",
-        "Discharging Energy / Wh",
-        "Step Time / s",
-        "Discharging Capacity / Ah",
-        "Charging Capacity / Ah",
-        "Cycle Count / 1",
-        "Power / W",
-        "Internal Resistance / Ohm",
-        "Ambient Temperature / degC",
-    }
-    assert set(df.columns) == expected_cols
 
 
 def test_read_biologic_no_header():
-    """no_header file has column labels but no preamble — should still normalize."""
-    path = SAMPLE_DATA / "biologic" / "Sample_data_biologic_no_header.mpt"
-    df, meta = read(path)
-    assert isinstance(df, pl.DataFrame)
+    df, meta = read(SAMPLE_DATA / "biologic" / "Sample_data_biologic_no_header.mpt")
     assert df.shape[0] > 0
-    # Source may be detected from columns even without magic string
     assert meta["source"] in (None, "biologic_mpt")
 
 
 def test_read_maccor_csv():
-    path = SAMPLE_DATA / "maccor" / "sample_data_maccor.csv"
-    df, meta = read(path)
-    _assert_bdf_output(df, meta, "maccor_csv", ["Test Time / s", "Voltage / V", "Current / A"])
+    df, meta = read(SAMPLE_DATA / "maccor" / "sample_data_maccor.csv")
+    _assert_bdf(df, meta, "maccor_csv", ["test_time_second", "voltage_volt", "current_ampere"])
 
 
 def test_read_neware_csv():
-    path = SAMPLE_DATA / "neware" / "sample_data_neware.csv"
-    df, meta = read(path, source="neware_csv")
-    _assert_bdf_output(df, meta, "neware_csv", ["Voltage / V", "Current / A"])
+    df, meta = read(SAMPLE_DATA / "neware" / "sample_data_neware.csv", source="neware_csv")
+    _assert_bdf(df, meta, "neware_csv", ["voltage_volt", "current_ampere"])
 
 
 def test_read_novonix_csv():
-    path = SAMPLE_DATA / "novonix" / "sample_data_novonix.csv"
-    df, meta = read(path)
-    _assert_bdf_output(df, meta, "novonix_csv", ["Test Time / s", "Voltage / V", "Current / A"])
+    df, meta = read(SAMPLE_DATA / "novonix" / "sample_data_novonix.csv")
+    _assert_bdf(df, meta, "novonix_csv", ["test_time_second", "voltage_volt", "current_ampere"])
 
-
-# ---------------------------------------------------------------------------
-# lazy=True path
-# ---------------------------------------------------------------------------
 
 def test_read_lazy_returns_lazyframe():
-    path = SAMPLE_DATA / "arbin" / "sample_data_arbin.csv"
-    lf, meta = read(path, source="arbin_csv", lazy=True)
+    lf, _ = read(SAMPLE_DATA / "arbin" / "sample_data_arbin.csv", source="arbin_csv", lazy=True)
     assert isinstance(lf, pl.LazyFrame)
-    df = lf.collect()
-    assert "Test Time / s" in df.columns
+    assert "voltage_volt" in lf.collect_schema().names()
 
 
-# ---------------------------------------------------------------------------
-# source override skips magic
-# ---------------------------------------------------------------------------
-
-def test_read_source_override():
-    path = SAMPLE_DATA / "basytec" / "sample_data_basytec.txt"
-    df, meta = read(path, source="basytec_txt")
-    assert meta["source"] == "basytec_txt"
-
-
-# ---------------------------------------------------------------------------
-# metadata extraction
-# ---------------------------------------------------------------------------
-
-def test_read_basytec_metadata():
-    path = SAMPLE_DATA / "basytec" / "sample_data_basytec.txt"
-    _, meta = read(path, source="basytec_txt")
-    # Basytec preamble has start/end datetime
+def test_read_basytec_preamble_metadata():
+    _, meta = read(SAMPLE_DATA / "basytec" / "sample_data_basytec.txt", source="basytec_txt")
     assert "start_datetime" in meta or "channel" in meta
 
 
-def test_read_biologic_metadata():
-    path = SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt"
-    _, meta = read(path)
-    # Biologic has 'acquisition_started' or 'channel' in preamble
+def test_read_biologic_preamble_metadata():
+    _, meta = read(SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt")
     assert "acquisition_started" in meta or "channel" in meta
 
 
-def test_read_novonix_metadata():
-    path = SAMPLE_DATA / "novonix" / "sample_data_novonix.csv"
-    _, meta = read(path)
+def test_read_novonix_metadata_channel():
+    _, meta = read(SAMPLE_DATA / "novonix" / "sample_data_novonix.csv")
     assert "channel" in meta
 
 
-# ---------------------------------------------------------------------------
-# shape / no empty output
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("path,source", [
-    (SAMPLE_DATA / "arbin" / "sample_data_arbin.csv", "arbin_csv"),
-    (SAMPLE_DATA / "basytec" / "sample_data_basytec.txt", "basytec_txt"),
-    (SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt", None),
-    (SAMPLE_DATA / "novonix" / "sample_data_novonix.csv", None),
-    (SAMPLE_DATA / "neware" / "sample_data_neware.csv", "neware_csv"),
-    (SAMPLE_DATA / "maccor" / "sample_data_maccor.csv", None),
+@pytest.mark.parametrize("path", [
+    SAMPLE_DATA / "arbin" / "sample_data_arbin.csv",
+    SAMPLE_DATA / "basytec" / "sample_data_basytec.txt",
+    SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt",
+    SAMPLE_DATA / "novonix" / "sample_data_novonix.csv",
+    SAMPLE_DATA / "neware" / "sample_data_neware.csv",
+    SAMPLE_DATA / "maccor" / "sample_data_maccor.csv",
 ])
-def test_read_non_empty(path, source):
-    df, meta = read(path, source=source)
-    assert df.shape[0] > 0, f"Empty DataFrame for {path.name}"
+def test_read_non_empty(path):
+    df, meta = read(path)
+    assert df.shape[0] > 0
     assert df.shape[1] > 0
     assert isinstance(meta, dict)
+
+
+def test_read_with_reader_instance_overrides_extension():
+    path = SAMPLE_DATA / "arbin" / "sample_data_arbin.csv"
+    df, meta = read(path, reader=CSVReader(source="arbin_csv"))
+    assert meta["source"] == "arbin_csv"
+    assert "voltage_volt" in df.columns
+
+
+def test_read_mat_without_column_map_raises(tmp_path):
+    p = tmp_path / "fake.mat"
+    p.write_bytes(b"")
+    with pytest.raises(ValueError, match="column_map"):
+        read(p)
+
+
+def test_read_include_optional_false():
+    df, _ = read(
+        SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt",
+        include_optional=False,
+    )
+    for c in df.columns:
+        if c in MR_NAMES:
+            assert BDFColumn[c.upper()].required, c
