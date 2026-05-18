@@ -100,10 +100,50 @@ class ResolvedColumn(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     source_header: str
-    bdf_unit: str | None = None
     scale: float = 1.0
     offset: float = 0.0
     datetime_fmts: tuple[str, ...] = ()
+
+    @classmethod
+    def from_column_map(cls, bdf_label_key: str, src_header: str) -> tuple[str, ResolvedColumn]:
+        """Resolve a BDF label key (e.g. 'Voltage / mV') to (mr_name, ResolvedColumn)."""
+        query_base = (
+            bdf_label_key.split(" / ")[0].strip().lower()
+            if " / " in bdf_label_key
+            else bdf_label_key.strip().lower()
+        )
+        mr_name: str | None = None
+        for _mr, _col in _SPEC_COLUMNS.items():
+            tmpl = _col.get("label_template", "")
+            tmpl_base = (
+                tmpl.split(" / ")[0].strip().lower()
+                if " / " in tmpl
+                else tmpl.strip().lower()
+            )
+            if tmpl_base == query_base:
+                mr_name = _mr
+                break
+        if mr_name is None:
+            raise ValueError(
+                f"column_map key {bdf_label_key!r}: label base {query_base!r} not found in BDF spec"
+            )
+        key_unit = _extract_unit(bdf_label_key)
+        bdf_unit = _col_unit(mr_name)
+        if key_unit is None:
+            scale, offset = 1.0, 0.0
+        else:
+            result = _pint_scale(key_unit, bdf_unit)
+            if result is None:
+                warnings.warn(
+                    f"column_map: unit {key_unit!r} in {bdf_label_key!r} not compatible "
+                    f"with {bdf_unit!r} for {mr_name}; using scale=1.0",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                scale, offset = 1.0, 0.0
+            else:
+                scale, offset = result
+        return mr_name, cls(source_header=src_header, scale=scale, offset=offset)
 
     @classmethod
     def from_synonyms(
@@ -118,7 +158,6 @@ class ResolvedColumn(BaseModel):
                 if syn.syn.exact_match(probe):
                     return cls(
                         source_header=header,
-                        bdf_unit=bdf_unit,
                         datetime_fmts=syn.fmts,
                     )
             else:
@@ -127,11 +166,32 @@ class ResolvedColumn(BaseModel):
                     scale, offset = result
                     return cls(
                         source_header=header,
-                        bdf_unit=bdf_unit,
                         scale=scale,
                         offset=offset,
                     )
         return None
+
+    def get_expr(self, mr_name: str, schema: dict) -> pl.Expr:
+        src = self.source_header
+        if self.datetime_fmts:
+            candidates = [
+                pl.col(src).str.to_datetime(fmt, strict=False)
+                for fmt in self.datetime_fmts
+            ]
+            expr = (
+                (pl.coalesce(candidates) if len(candidates) > 1 else candidates[0])
+                .dt.timestamp("ms")
+                .cast(pl.Float64) / 1000.0
+            )
+            return expr.alias(mr_name)
+        expr = pl.col(src).cast(pl.Float64, strict=False)
+        if self.scale != 1.0:
+            expr = expr * self.scale
+        if self.offset != 0.0:
+            expr = expr + self.offset
+        if _col_dtype(mr_name) == "int":
+            expr = expr.cast(pl.Int64, strict=False)
+        return expr.alias(mr_name)
 
 
 _UNIT_FIXUPS = {
@@ -205,72 +265,6 @@ class MetadataParser(BaseModel):
         return result
 
 
-def _sniff_decimal(df: pl.DataFrame | pl.LazyFrame) -> str:
-    """Return ',' if comma-decimal strings dominate string columns, else '.'."""
-    sample = df.head(1000).collect() if isinstance(df, pl.LazyFrame) else df.head(1000)
-    comma = dot = 0
-    for col in sample.columns:
-        if sample[col].dtype in (pl.String, pl.Utf8):
-            comma += int(sample[col].str.count_matches(r"\d+,\d+").sum())
-            dot += int(sample[col].str.count_matches(r"\d+\.\d+").sum())
-    return "," if comma > dot else "."
-
-
-def _build_expr(
-    mr_name: str,
-    rc: ResolvedColumn,
-    schema: dict,
-    decimal: str,
-) -> pl.Expr:
-    src = rc.source_header
-    if rc.datetime_fmts:
-        candidates = [
-            pl.col(src).str.to_datetime(fmt, strict=False)
-            for fmt in rc.datetime_fmts
-        ]
-        expr = (
-            (pl.coalesce(candidates) if len(candidates) > 1 else candidates[0])
-            .dt.timestamp("ms")
-            .cast(pl.Float64) / 1000.0
-        )
-        return expr.alias(mr_name)
-    expr = pl.col(src)
-    if decimal != "." and schema.get(src) in (pl.String, pl.Utf8):
-        expr = expr.str.replace_all(decimal, ".", literal=True)
-    expr = expr.cast(pl.Float64, strict=False)
-    if rc.scale != 1.0:
-        expr = expr * rc.scale
-    if rc.offset != 0.0:
-        expr = expr + rc.offset
-    if _col_dtype(mr_name) == "int":
-        expr = expr.cast(pl.Int64, strict=False)
-    return expr.alias(mr_name)
-
-
-def _resolved_from_column_map_value(mr_name: str, src_header: str) -> ResolvedColumn:
-    src_unit = _extract_unit(src_header)
-    bdf_unit = _col_unit(mr_name)
-    if src_unit is None:
-        scale, offset = 1.0, 0.0
-    else:
-        result = _pint_scale(src_unit, bdf_unit)
-        if result is None:
-            warnings.warn(
-                f"column_map: unit {src_unit!r} on {src_header!r} not compatible "
-                f"with {bdf_unit!r} for {mr_name}; using scale=1.0",
-                UserWarning,
-                stacklevel=4,
-            )
-            scale, offset = 1.0, 0.0
-        else:
-            scale, offset = result
-    return ResolvedColumn(
-        source_header=src_header,
-        bdf_unit=bdf_unit,
-        scale=scale,
-        offset=offset,
-    )
-
 
 class Normalizer(BaseModel):
     """Column-mapping model: one optional field per BDF mr_name.
@@ -317,23 +311,36 @@ class Normalizer(BaseModel):
             if val is not None:
                 yield mr_name, val
 
-    def score(self, headers: list[str]) -> int:
-        """Count how many headers match via synonym scanning (ResolvedColumn fields skipped)."""
+    def resolve(self, headers: list[str]) -> dict[str, ResolvedColumn]:
+        """Return mr_name → ResolvedColumn for all headers that match a synonym field.
+
+        ResolvedColumn fields are passed through as-is. Each source header is
+        claimed at most once (first match in declaration order wins).
+        """
         probes = {h: h.strip().lstrip("~").strip() for h in headers}
         claimed: set[str] = set()
-        count = 0
+        result: dict[str, ResolvedColumn] = {}
         for mr_name, spec in self:
             if isinstance(spec, ResolvedColumn):
-                continue
-            unit = _col_unit(mr_name)
-            for header in headers:
-                if header in claimed:
-                    continue
-                if ResolvedColumn.from_synonyms(header, probes[header], unit, spec) is not None:
-                    claimed.add(header)
-                    count += 1
-                    break
-        return count
+                result[mr_name] = spec
+                if spec.source_header in headers:
+                    claimed.add(spec.source_header)
+            else:
+                unit = _col_unit(mr_name)
+                for header in headers:
+                    if header in claimed:
+                        continue
+                    matched = ResolvedColumn.from_synonyms(header, probes[header], unit, spec)
+                    if matched is not None:
+                        result[mr_name] = matched
+                        claimed.add(header)
+                        break
+        return result
+
+    def score(self, headers: list[str]) -> int:
+        """Count how many headers match via synonym scanning (ResolvedColumn fields skipped)."""
+        resolved = self.resolve(headers)
+        return sum(1 for mr_name, spec in self if isinstance(spec, list) and mr_name in resolved)
 
     def normalize(
         self,
@@ -342,46 +349,21 @@ class Normalizer(BaseModel):
         include_optional: bool = True,
         column_map: dict[str, str] | None = None,
         extra_columns: dict[str, str] | None = None,
-        decimal: str | None = None,
-    ) -> tuple[pl.DataFrame | pl.LazyFrame, dict]:
-        """Resolve headers → BDF columns, apply unit conversion, return (df_out, columns_meta)."""
+    ) -> pl.DataFrame | pl.LazyFrame:
+        """Resolve headers → BDF columns, apply unit conversion, return df_out."""
         schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
         headers = list(schema.names())
 
-        probes = {h: h.strip().lstrip("~").strip() for h in headers}
-
-        resolved: dict[str, ResolvedColumn] = {}
-        claimed: set[str] = set()
-
-        for mr_name, spec in self:
-            unit = _col_unit(mr_name)
-            if isinstance(spec, ResolvedColumn):
-                resolved[mr_name] = spec
-                if spec.source_header in headers:
-                    claimed.add(spec.source_header)
-            else:
-                for header in headers:
-                    if header in claimed:
-                        continue
-                    matched = ResolvedColumn.from_synonyms(header, probes[header], unit, spec)
-                    if matched is not None:
-                        resolved[mr_name] = matched
-                        claimed.add(header)
-                        break
+        resolved = self.resolve(headers)
 
         if column_map:
-            for mr_name, src_header in column_map.items():
-                if mr_name not in _SPEC_COLUMNS:
-                    raise ValueError(f"column_map key {mr_name!r} is not a valid BDF mr_name")
-                resolved[mr_name] = _resolved_from_column_map_value(mr_name, src_header)
+            for bdf_label_key, src_header in column_map.items():
+                mr_name, rc = ResolvedColumn.from_column_map(bdf_label_key, src_header)
+                resolved[mr_name] = rc
 
         if not include_optional:
             resolved = {mr: r for mr, r in resolved.items() if _col_required(mr)}
 
-        if decimal is None:
-            decimal = _sniff_decimal(df)
-
-        columns_meta: dict = {}
         exprs: list[pl.Expr] = []
         schema_dict = dict(schema)
 
@@ -392,20 +374,7 @@ class Normalizer(BaseModel):
                     rc.source_header,
                 )
                 continue
-            src_unit: str | None = None
-            if not rc.datetime_fmts:
-                raw_unit = _extract_unit(rc.source_header)
-                if raw_unit is not None:
-                    src_unit = _norm_unit(raw_unit)
-            columns_meta[mr_name] = {
-                "source_header": rc.source_header,
-                "source_unit": src_unit,
-                "bdf_unit": rc.bdf_unit,
-                "scale": rc.scale,
-                "offset": rc.offset,
-                "datetime_fmts": rc.datetime_fmts,
-            }
-            exprs.append(_build_expr(mr_name, rc, schema_dict, decimal))
+            exprs.append(rc.get_expr(mr_name, schema_dict))
 
         if extra_columns:
             for src, out in extra_columns.items():
@@ -419,9 +388,9 @@ class Normalizer(BaseModel):
                 exprs.append(pl.col(src).alias(out))
 
         if not exprs:
-            return df, columns_meta
+            return df
 
-        return df.select(exprs), columns_meta
+        return df.select(exprs)
 
 
 class Source(BaseModel):
@@ -461,10 +430,7 @@ __all__ = [
     "_col_unit",
     "_col_required",
     "_col_dtype",
-    "_sniff_decimal",
     "_pint_scale",
     "_norm_unit",
     "_extract_unit",
-    "_build_expr",
-    "_resolved_from_column_map_value",
 ]

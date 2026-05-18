@@ -28,6 +28,30 @@ from .schema import MetadataParser, Normalizer, ResolvedColumn, Source, _SPEC_CO
 from .sources import REGISTRY, get_normalizer
 
 
+def _sniff_decimal(df: pl.DataFrame | pl.LazyFrame) -> str:
+    """Return ',' if comma-decimal strings dominate string columns, else '.'."""
+    sample = df.head(1000).collect() if isinstance(df, pl.LazyFrame) else df.head(1000)
+    comma = dot = 0
+    for col in sample.columns:
+        if sample[col].dtype in (pl.String, pl.Utf8):
+            comma += int(sample[col].str.count_matches(r"\d+,\d+").sum())
+            dot += int(sample[col].str.count_matches(r"\d+\.\d+").sum())
+    return "," if comma > dot else "."
+
+
+def _coerce_decimal(lf: pl.LazyFrame, decimal: str) -> pl.LazyFrame:
+    """Replace non-standard decimal separator in string columns."""
+    if decimal == ".":
+        return lf
+    schema = lf.collect_schema()
+    exprs = [
+        pl.col(c).str.replace_all(decimal, ".", literal=True).alias(c)
+        if dtype in (pl.String, pl.Utf8) else pl.col(c)
+        for c, dtype in schema.items()
+    ]
+    return lf.select(exprs)
+
+
 def _coerce_source(v: Any) -> Any:
     if v is None or isinstance(v, Source):
         return v
@@ -247,15 +271,17 @@ class BaseReader(BaseModel):
         schema = lf.collect_schema()
         headers = list(schema.names())
         resolved_source = _resolve_source_for(self.source, head_bytes, headers)
-        decimal = getattr(self, "decimal", None)
-        bdf_lf, metadata = normalize(
+        if "decimal" in type(self).model_fields:
+            decimal: str = self.decimal or _sniff_decimal(lf)  # type: ignore[attr-defined]
+            lf = _coerce_decimal(lf, decimal)
+        bdf_lf = normalize(
             lf,
             source=resolved_source,
             include_optional=self.include_optional,
             column_map=column_map,
             extra_columns=self.extra_columns,
-            decimal=decimal,
         )
+        metadata: dict = {}
         if resolved_source is not None and preamble:
             for key, val in resolved_source.metadata.parse(preamble).items():
                 metadata[key] = val
@@ -358,17 +384,17 @@ def _coerce_resolved_value(val: Any, unit: str) -> ResolvedColumn:
     if isinstance(val, ResolvedColumn):
         return val
     if isinstance(val, str):
-        return ResolvedColumn(source_header=val, bdf_unit=unit, scale=1.0, offset=0.0)
+        return ResolvedColumn(source_header=val, scale=1.0, offset=0.0)
     if isinstance(val, (tuple, list)):
         if len(val) == 2:
-            return ResolvedColumn(source_header=val[0], bdf_unit=unit, scale=float(val[1]), offset=0.0)
+            return ResolvedColumn(source_header=val[0], scale=float(val[1]), offset=0.0)
         if len(val) == 3:
-            return ResolvedColumn(source_header=val[0], bdf_unit=unit, scale=float(val[1]), offset=float(val[2]))
+            return ResolvedColumn(source_header=val[0], scale=float(val[1]), offset=float(val[2]))
         raise ValueError(
             f"MATReader.column_map value must be str | tuple-2 | tuple-3 | ResolvedColumn; got {val!r}"
         )
     if isinstance(val, dict):
-        return ResolvedColumn.model_validate({"bdf_unit": unit, **val})
+        return ResolvedColumn.model_validate({k: v for k, v in val.items() if k != "bdf_unit"})
     raise TypeError(f"unsupported MATReader.column_map value type: {type(val).__name__}")
 
 
@@ -391,11 +417,6 @@ def _build_mat_normalizer(raw: dict[Any, Any]) -> Normalizer:
         mr_name = _coerce_bdfcolumn_key(k)
         unit = str(_SPEC_COLUMNS[mr_name]["unit"])
         rc = _coerce_resolved_value(val, unit)
-        if rc.bdf_unit and rc.bdf_unit != unit:
-            raise ValueError(
-                f"{mr_name}: column_map bdf_unit {rc.bdf_unit!r} does not match "
-                f"BDF unit {unit!r}"
-            )
         if rc.source_header in seen_headers:
             raise ValueError(
                 f"MATReader.column_map: duplicate source_header {rc.source_header!r}"

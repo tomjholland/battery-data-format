@@ -150,7 +150,6 @@ def test_matreader_string_shorthand_coerced():
     assert isinstance(rc, ResolvedColumn)
     assert rc.source_header == "v_cell"
     assert rc.scale == 1.0
-    assert rc.bdf_unit == "V"
 
 
 def test_matreader_tuple2_coerced():
@@ -171,15 +170,9 @@ def test_matreader_tuple3_coerced():
 
 
 def test_matreader_resolvedcolumn_direct():
-    rc_in = ResolvedColumn(source_header="v", bdf_unit="V", scale=1.0, offset=0.0)
+    rc_in = ResolvedColumn(source_header="v", scale=1.0, offset=0.0)
     r = MATReader(column_map={"voltage_volt": rc_in})
     assert r.normalizer.voltage_volt == rc_in
-
-
-def test_matreader_mismatched_bdf_unit_rejected():
-    bad = ResolvedColumn(source_header="x", bdf_unit="A", scale=1.0, offset=0.0)
-    with pytest.raises((ValueError, ValidationError, TypeError)):
-        MATReader(column_map={"voltage_volt": bad})
 
 
 def test_matreader_duplicate_source_header_rejected():

@@ -188,7 +188,7 @@ def test_normalizer_syn_field_construction():
 
 
 def test_normalizer_resolved_column_field():
-    rc = ResolvedColumn(source_header="U", bdf_unit="V", scale=1.0)
+    rc = ResolvedColumn(source_header="U", scale=1.0)
     n = Normalizer(voltage_volt=rc)
     assert n.voltage_volt == rc
 
@@ -240,7 +240,7 @@ def test_normalizer_score_matches_count():
 
 
 def test_normalizer_score_resolved_column_skipped():
-    rc = ResolvedColumn(source_header="U", bdf_unit="V", scale=1.0)
+    rc = ResolvedColumn(source_header="U", scale=1.0)
     n = Normalizer(voltage_volt=rc)
     # ResolvedColumn fields don't count in scoring
     assert n.score(["U"]) == 0
@@ -252,17 +252,17 @@ def test_normalizer_normalize_syn_path():
     import polars as pl
     n = Normalizer(voltage_volt=[Syn("Ewe/{unit}")])
     df = pl.DataFrame({"Ewe/V": ["3.5", "3.6"]})
-    out, meta = n.normalize(df)
+    out = n.normalize(df)
     assert "voltage_volt" in out.columns
     assert out["voltage_volt"][0] == pytest.approx(3.5)
 
 
 def test_normalizer_normalize_resolved_column_path():
     import polars as pl
-    rc = ResolvedColumn(source_header="U", bdf_unit="V", scale=1.0)
+    rc = ResolvedColumn(source_header="U", scale=1.0)
     n = Normalizer(voltage_volt=rc)
     df = pl.DataFrame({"U": [3.5, 3.6]})
-    out, meta = n.normalize(df)
+    out = n.normalize(df)
     assert "voltage_volt" in out.columns
     assert out["voltage_volt"][0] == pytest.approx(3.5)
 
@@ -271,7 +271,7 @@ def test_normalizer_normalize_none_field_absent():
     import polars as pl
     n = Normalizer()
     df = pl.DataFrame({"Ewe/V": ["3.5"]})
-    out, meta = n.normalize(df)
+    out = n.normalize(df)
     assert "voltage_volt" not in out.columns
 
 
@@ -282,7 +282,7 @@ def test_normalizer_normalize_include_optional_false():
         cycle_count=[Syn("cycle number")],
     )
     df = pl.DataFrame({"Ewe/V": ["3.5"], "cycle number": ["3"]})
-    out, _ = n.normalize(df, include_optional=False)
+    out = n.normalize(df, include_optional=False)
     assert "voltage_volt" in out.columns
     assert "cycle_count" not in out.columns
 
@@ -291,7 +291,7 @@ def test_normalizer_normalize_unit_conversion():
     import polars as pl
     n = Normalizer(current_ampere=[Syn("I/{unit}")])
     df = pl.DataFrame({"I/mA": ["1000.0"]})
-    out, _ = n.normalize(df)
+    out = n.normalize(df)
     assert out["current_ampere"][0] == pytest.approx(1.0)
 
 
@@ -299,7 +299,7 @@ def test_normalizer_normalize_temperature_degf_to_celsius():
     import polars as pl
     n = Normalizer(ambient_temperature_celsius=[Syn("T/{unit}")])
     df = pl.DataFrame({"T/degF": [32.0, 212.0]})
-    out, _ = n.normalize(df)
+    out = n.normalize(df)
     assert out["ambient_temperature_celsius"][0] == pytest.approx(0.0, abs=1e-9)
     assert out["ambient_temperature_celsius"][1] == pytest.approx(100.0, abs=1e-9)
 
