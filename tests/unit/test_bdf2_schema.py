@@ -19,7 +19,6 @@ from bdf2.schema import (  # noqa: E402
     _col_dtype,
     _col_required,
     _col_unit,
-    _match_header,
 )
 from bdf2.sources import REGISTRY, get_normalizer
 
@@ -62,36 +61,48 @@ def test_syn_construction():
     assert s.exemplar == "I[{unit}]"
 
 
-def test_syn_match_brackets():
-    assert Syn("I[{unit}]").match("I[mA]") == "mA"
+# 4.1 Syn.match tests
+def test_syn_match_unitless_match():
+    assert Syn("Voltage").match("voltage", "V") == (1.0, 0.0)
 
 
-def test_syn_match_parens_case_insensitive():
-    assert Syn("voltage({unit})").match("Voltage(V)") == "V"
+def test_syn_match_unitless_no_match():
+    assert Syn("Voltage").match("current", "V") is None
 
 
-def test_syn_match_compound_unit():
-    assert Syn("q charge/{unit}").match("q charge/mA.h") == "mA.h"
+def test_syn_match_unit_bearing_compatible():
+    result = Syn("Voltage / {unit}").match("Voltage / mV", "V")
+    assert result is not None
+    assert result == pytest.approx((0.001, 0.0))
 
 
-def test_syn_match_plain_exact():
-    assert Syn("voltage").match("voltage") == ""
+def test_syn_match_unit_bearing_identical():
+    assert Syn("Voltage / {unit}").match("Voltage / V", "V") == (1.0, 0.0)
 
 
-def test_syn_match_plain_case_insensitive():
-    assert Syn("Cycle").match("cycle") == ""
+def test_syn_match_unit_bearing_incompatible():
+    assert Syn("Voltage / {unit}").match("Voltage / A", "V") is None
 
 
-def test_syn_match_plain_no_unit_header():
-    assert Syn("voltage").match("voltage(mV)") is None
+def test_syn_match_unit_bearing_no_match():
+    assert Syn("Voltage / {unit}").match("Current / A", "V") is None
 
 
-def test_syn_match_qty_mismatch():
-    assert Syn("I[{unit}]").match("voltage[V]") is None
+# 4.2 Syn.exact_match tests
+def test_syn_exact_match_exact():
+    assert Syn("Timestamp").exact_match("timestamp") is True
 
 
-def test_syn_match_missing_unit():
-    assert Syn("I[{unit}]").match("I") is None
+def test_syn_exact_match_case_insensitive():
+    assert Syn("Timestamp").exact_match("TIMESTAMP") is True
+
+
+def test_syn_exact_match_whitespace_stripped():
+    assert Syn("Timestamp").exact_match("  Timestamp  ") is True
+
+
+def test_syn_exact_match_no_match():
+    assert Syn("Timestamp").exact_match("Date") is False
 
 
 # --------------------------------------------------------------------- DateTimeSyn
@@ -284,13 +295,34 @@ def test_normalizer_normalize_unit_conversion():
     assert out["current_ampere"][0] == pytest.approx(1.0)
 
 
-# --------------------------------------------------------------------- _match_header end-to-end
+# --------------------------------------------------------------------- 4.3 ResolvedColumn.from_synonyms
 
-def test_match_header_unit_scale():
-    rc = _match_header("I[mA]", "I[mA]", "A", [Syn("I[{unit}]")])
+def test_from_synonyms_syn_match():
+    rc = ResolvedColumn.from_synonyms("Voltage / mV", "Voltage / mV", "V", [Syn("Voltage / {unit}")])
+    assert rc is not None
+    assert rc.source_header == "Voltage / mV"
+    assert rc.scale == pytest.approx(0.001)
+    assert rc.offset == 0.0
+
+
+def test_from_synonyms_datetime_syn_match():
+    dt_syn = DateTimeSyn(syn=Syn("Timestamp"), fmts=("%Y-%m-%d %H:%M:%S",))
+    rc = ResolvedColumn.from_synonyms("Timestamp", "timestamp", "1", [dt_syn])
+    assert rc is not None
+    assert rc.datetime_fmts == ("%Y-%m-%d %H:%M:%S",)
+    assert rc.scale == 1.0
+
+
+def test_from_synonyms_no_match():
+    rc = ResolvedColumn.from_synonyms("junk", "junk", "V", [Syn("Voltage / {unit}")])
+    assert rc is None
+
+
+def test_from_synonyms_first_wins():
+    syns = [Syn("Voltage / {unit}"), Syn("Voltage / {unit}")]
+    rc = ResolvedColumn.from_synonyms("Voltage / mV", "Voltage / mV", "V", syns)
     assert rc is not None
     assert rc.scale == pytest.approx(0.001)
-    assert rc.source_header == "I[mA]"
 
 
 # --------------------------------------------------------------------- Source

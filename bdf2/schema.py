@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import re
 import warnings
@@ -66,14 +67,20 @@ class Syn(RootModel[str]):
     def exemplar(self) -> str:
         return self.root
 
-    def match(self, header: str) -> str | None:
-        """Return captured unit string on match, '' for no-unit match, None on no match."""
+    def match(self, header: str, bdf_unit: str) -> tuple[float, float] | None:
+        """Return (scale, offset) on match, None on no match or incompatible units."""
         if "{unit}" in self.root:
             parts = self.root.split("{unit}")
             pattern = _UNIT_CAPTURE.join(re.escape(p) for p in parts)
             m = re.fullmatch(pattern, header, re.IGNORECASE)
-            return m.group(1) if m else None
-        return "" if self.root.strip().lower() == header.strip().lower() else None
+            if m is None:
+                return None
+            factor = _pint_scale(m.group(1), bdf_unit)
+            return (factor, 0.0) if factor is not None else None
+        return (1.0, 0.0) if self.root.strip().lower() == header.strip().lower() else None
+
+    def exact_match(self, header: str) -> bool:
+        return self.root.strip().lower() == header.strip().lower()
 
 
 class DateTimeSyn(BaseModel):
@@ -99,6 +106,34 @@ class ResolvedColumn(BaseModel):
     offset: float = 0.0
     datetime_fmts: tuple[str, ...] = ()
 
+    @classmethod
+    def from_synonyms(
+        cls,
+        header: str,
+        probe: str,
+        bdf_unit: str,
+        synonyms: list[SynUnion],
+    ) -> ResolvedColumn | None:
+        for syn in synonyms:
+            if isinstance(syn, DateTimeSyn):
+                if syn.syn.exact_match(probe):
+                    return cls(
+                        source_header=header,
+                        bdf_unit=bdf_unit,
+                        datetime_fmts=syn.fmts,
+                    )
+            else:
+                result = syn.match(probe, bdf_unit)
+                if result is not None:
+                    scale, offset = result
+                    return cls(
+                        source_header=header,
+                        bdf_unit=bdf_unit,
+                        scale=scale,
+                        offset=offset,
+                    )
+        return None
+
 
 _UNIT_FIXUPS = {
     "°c": "degC",
@@ -108,6 +143,7 @@ _UNIT_FIXUPS = {
 }
 
 
+@functools.lru_cache(maxsize=256)
 def _norm_unit(u: str) -> str:
     s = u.strip()
     for k, v in _UNIT_FIXUPS.items():
@@ -116,6 +152,7 @@ def _norm_unit(u: str) -> str:
     return s
 
 
+@functools.lru_cache(maxsize=256)
 def _pint_scale(src_unit: str | None, dst_unit: str) -> float | None:
     """Return pint conversion factor src→dst, or None when incompatible/unparseable."""
     if src_unit is None or dst_unit in ("1", "", None):
@@ -231,41 +268,6 @@ def _resolved_from_column_map_value(mr_name: str, src_header: str) -> ResolvedCo
     )
 
 
-def _match_header(
-    header: str,
-    probe: str,
-    bdf_unit: str,
-    synonyms: list[SynUnion],
-) -> ResolvedColumn | None:
-    for syn in synonyms:
-        if isinstance(syn, DateTimeSyn):
-            if syn.syn.root.strip().lower() == probe.strip().lower():
-                return ResolvedColumn(
-                    source_header=header,
-                    bdf_unit=bdf_unit,
-                    scale=1.0,
-                    offset=0.0,
-                    datetime_fmts=syn.fmts,
-                )
-            continue
-        captured = syn.match(probe)
-        if captured is None:
-            continue
-        if captured == "":
-            factor = 1.0
-        else:
-            factor = _pint_scale(captured, bdf_unit)
-            if factor is None:
-                continue
-        return ResolvedColumn(
-            source_header=header,
-            bdf_unit=bdf_unit,
-            scale=factor,
-            offset=0.0,
-        )
-    return None
-
-
 class Normalizer(BaseModel):
     """Column-mapping model: one optional field per BDF mr_name.
 
@@ -323,7 +325,7 @@ class Normalizer(BaseModel):
             for header in headers:
                 if header in claimed:
                     continue
-                if _match_header(header, probes[header], unit, spec) is not None:
+                if ResolvedColumn.from_synonyms(header, probes[header], unit, spec) is not None:
                     claimed.add(header)
                     count += 1
                     break
@@ -357,7 +359,7 @@ class Normalizer(BaseModel):
                 for header in headers:
                     if header in claimed:
                         continue
-                    matched = _match_header(header, probes[header], unit, spec)
+                    matched = ResolvedColumn.from_synonyms(header, probes[header], unit, spec)
                     if matched is not None:
                         resolved[mr_name] = matched
                         claimed.add(header)
@@ -377,6 +379,7 @@ class Normalizer(BaseModel):
 
         columns_meta: dict = {}
         exprs: list[pl.Expr] = []
+        schema_dict = dict(schema)
 
         for mr_name, rc in resolved.items():
             if rc.source_header not in headers:
@@ -398,7 +401,7 @@ class Normalizer(BaseModel):
                 "offset": rc.offset,
                 "datetime_fmts": rc.datetime_fmts,
             }
-            exprs.append(_build_expr(mr_name, rc, dict(schema), decimal))
+            exprs.append(_build_expr(mr_name, rc, schema_dict, decimal))
 
         if extra_columns:
             for src, out in extra_columns.items():
@@ -458,7 +461,6 @@ __all__ = [
     "_pint_scale",
     "_norm_unit",
     "_extract_unit",
-    "_match_header",
     "_build_expr",
     "_resolved_from_column_map_value",
 ]
