@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 
 from .readers import BaseReader, CSVReader, ExcelReader, MATReader
-from .schema import BDFColumn, ResolvedColumn
+from .schema import Source
 
 _CSV_EXTS = {".csv", ".tsv", ".txt", ".dat"}
 _EXCEL_EXTS = {".xlsx", ".xlsm", ".xls"}
@@ -25,24 +25,9 @@ def _reader_class_for(path: Path) -> type[BaseReader]:
     return CSVReader
 
 
-def _build_mat_column_map(column_map: dict[str, str] | None) -> dict[BDFColumn, ResolvedColumn] | None:
-    if not column_map:
-        return None
-    mr_to_col = {c.mr_name: c for c in BDFColumn}
-    out: dict[BDFColumn, ResolvedColumn] = {}
-    for mr_name, src in column_map.items():
-        if mr_name not in mr_to_col:
-            raise ValueError(f"column_map key {mr_name!r} is not a valid BDF mr_name")
-        col = mr_to_col[mr_name]
-        out[col] = ResolvedColumn(
-            source_header=src, bdf_unit=col.unit, scale=1.0, offset=0.0,
-        )
-    return out
-
-
 def read(
     path: str | Path,
-    source: str | None = None,
+    source: str | Source | None = None,
     *,
     reader: BaseReader | str | Path | None = None,
     lazy: bool = False,
@@ -66,16 +51,15 @@ def read(
     if reader is None:
         instance: BaseReader
         if cls is MATReader:
-            mat_cm = _build_mat_column_map(column_map)
-            if mat_cm is None:
+            if not column_map:
                 raise ValueError(
                     f"{path}: .mat files require an explicit column_map "
                     f"(use bdf2.MATReader(column_map=...) or pass column_map=...)"
                 )
-            instance = MATReader(column_map=mat_cm, source=source)
+            instance = MATReader.model_validate({"column_map": column_map})
             return instance.read(path, lazy=lazy)
         else:
-            instance = cls(source=source, include_optional=include_optional, extra_columns=extra_columns)
+            instance = cls(source=source, include_optional=include_optional, extra_columns=extra_columns)  # type: ignore[call-arg]
     elif isinstance(reader, BaseReader):
         instance = reader
         if source is not None:

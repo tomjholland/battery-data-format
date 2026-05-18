@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self
 
@@ -21,27 +20,26 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
-    field_validator,
     model_validator,
 )
 
 from ._normalize import normalize
-from .schema import BDFColumn, Normalizer, ResolvedColumn
+from .schema import MetadataParser, Normalizer, ResolvedColumn, Source, _SPEC_COLUMNS
 from .sources import REGISTRY, get_normalizer
 
 
 def _coerce_source(v: Any) -> Any:
-    if v is None or isinstance(v, Normalizer):
+    if v is None or isinstance(v, Source):
         return v
     if isinstance(v, str):
         try:
             return get_normalizer(v)
         except KeyError as exc:
             raise ValueError(str(exc)) from exc
-    raise ValueError(f"source must be Normalizer | str | None, got {type(v).__name__}")
+    raise ValueError(f"source must be Source | str | None, got {type(v).__name__}")
 
 
-SourceField = Annotated[Normalizer | None, BeforeValidator(_coerce_source)]
+SourceField = Annotated[Source | None, BeforeValidator(_coerce_source)]
 
 
 def _read_sample_bytes(path: Path, n_bytes: int = 65536) -> str:
@@ -118,17 +116,17 @@ def _detect_layout(
 
 
 def _resolve_source_for(
-    explicit: Normalizer | None,
+    explicit: Source | None,
     head_bytes: bytes,
     headers: list[str],
-) -> Normalizer | None:
+) -> Source | None:
     if explicit is not None:
         return explicit
     magic_matches = [n for n in REGISTRY if n.match_magic(head_bytes)]
     if len(magic_matches) == 1:
         return magic_matches[0]
     pool = magic_matches if magic_matches else REGISTRY
-    best: Normalizer | None = None
+    best: Source | None = None
     best_score = 0
     for n in pool:
         sc = n.score(headers)
@@ -235,34 +233,7 @@ class BaseReader(BaseModel):
         lazy: bool = False,
         column_map: dict[str, str] | None = None,
     ) -> tuple[pl.DataFrame | pl.LazyFrame, dict]:
-        """Read ``path`` and return ``(df, metadata)`` in BDF canonical form.
-
-        Pipeline:
-
-        1. If no reader fields are explicitly set (except ``source``), search for
-           a sibling JSON config and merge it into unset fields.
-
-           Search order (per reader ``kind``):
-
-           - ``$BDF_<KIND>_CONFIG`` environment variable
-           - ``<stem-stripped-of-all-suffixes>.<kind>.json`` next to the data file
-           - ``bdf.<kind>.json`` next to the data file
-           - ``<kind>.json`` next to the data file
-           - ``contribution.json`` / ``collection.json`` walked from the data
-             directory up to filesystem root, picking the ``<kind>`` sub-object
-
-        2. Subclass ``_parse(path)`` returns a ``pl.LazyFrame`` of ``Utf8``
-           columns plus any preamble lines.
-        3. Source resolution: an explicit ``self.source`` wins; otherwise the
-           file head bytes (preamble or first 8 KB) are tested against every
-           ``Normalizer.match_magic`` and the highest-scoring ``Normalizer`` is
-           selected (with magic matches preferred when at least one matches).
-        4. :func:`bdf2.normalize` rewrites the columns to BDF ``mr_name``
-           identifiers, applying pint scale/offset, decimal-separator sniffing,
-           and dtype coercion.
-        5. ``metadata_patterns`` from the resolved source are matched against
-           the preamble; matches land in the returned metadata dict.
-        """
+        """Read ``path`` and return ``(df, metadata)`` in BDF canonical form."""
         path = Path(path)
         if not self.model_fields_set or self.model_fields_set <= {"source"}:
             self._fill_from_config_file(path)
@@ -286,13 +257,8 @@ class BaseReader(BaseModel):
             decimal=decimal,
         )
         if resolved_source is not None and preamble:
-            for key, pattern in resolved_source.metadata_patterns.items():
-                rx = re.compile(pattern, re.IGNORECASE)
-                for line in preamble:
-                    m = rx.search(line)
-                    if m:
-                        metadata[key] = m.group(1).strip()
-                        break
+            for key, val in resolved_source.metadata.parse(preamble).items():
+                metadata[key] = val
         if lazy:
             return bdf_lf, metadata
         return bdf_lf.collect() if isinstance(bdf_lf, pl.LazyFrame) else bdf_lf, metadata
@@ -388,42 +354,57 @@ class ExcelReader(BaseReader):
         return df.lazy(), []
 
 
-def _coerce_resolved_value(val: Any, col: BDFColumn) -> ResolvedColumn:
+def _coerce_resolved_value(val: Any, unit: str) -> ResolvedColumn:
     if isinstance(val, ResolvedColumn):
         return val
     if isinstance(val, str):
-        return ResolvedColumn(
-            source_header=val, bdf_unit=col.unit, scale=1.0, offset=0.0,
-        )
+        return ResolvedColumn(source_header=val, bdf_unit=unit, scale=1.0, offset=0.0)
     if isinstance(val, (tuple, list)):
         if len(val) == 2:
-            return ResolvedColumn(
-                source_header=val[0], bdf_unit=col.unit, scale=float(val[1]), offset=0.0,
-            )
+            return ResolvedColumn(source_header=val[0], bdf_unit=unit, scale=float(val[1]), offset=0.0)
         if len(val) == 3:
-            return ResolvedColumn(
-                source_header=val[0], bdf_unit=col.unit,
-                scale=float(val[1]), offset=float(val[2]),
-            )
+            return ResolvedColumn(source_header=val[0], bdf_unit=unit, scale=float(val[1]), offset=float(val[2]))
         raise ValueError(
-            f"MATReader.column_map value must be str | tuple-2 | tuple-3 | ResolvedColumn"
-            f"; got {val!r}"
+            f"MATReader.column_map value must be str | tuple-2 | tuple-3 | ResolvedColumn; got {val!r}"
         )
     if isinstance(val, dict):
-        return ResolvedColumn.model_validate({"bdf_unit": col.unit, **val})
+        return ResolvedColumn.model_validate({"bdf_unit": unit, **val})
     raise TypeError(f"unsupported MATReader.column_map value type: {type(val).__name__}")
 
 
-def _coerce_bdfcolumn_key(k: Any) -> BDFColumn:
-    if isinstance(k, BDFColumn):
-        return k
+def _coerce_bdfcolumn_key(k: Any) -> str:
+    """Return the BDF mr_name for k, accepting mr_name or SCREAMING_SNAKE_CASE."""
     if isinstance(k, str):
-        if k in BDFColumn.__members__:
-            return BDFColumn[k]
-        for c in BDFColumn:
-            if c.mr_name == k:
-                return c
-    raise ValueError(f"MATReader.column_map key {k!r} is not a BDFColumn / mr_name / enum name")
+        if k in _SPEC_COLUMNS:
+            return k
+        lowered = k.lower()
+        if lowered in _SPEC_COLUMNS:
+            return lowered
+    raise ValueError(f"MATReader.column_map key {k!r} is not a valid BDF mr_name")
+
+
+def _build_mat_normalizer(raw: dict[Any, Any]) -> Normalizer:
+    """Convert a column_map dict into a Normalizer with ResolvedColumn fields."""
+    kwargs: dict[str, ResolvedColumn] = {}
+    seen_headers: set[str] = set()
+    for k, val in raw.items():
+        mr_name = _coerce_bdfcolumn_key(k)
+        unit = str(_SPEC_COLUMNS[mr_name]["unit"])
+        rc = _coerce_resolved_value(val, unit)
+        if rc.bdf_unit and rc.bdf_unit != unit:
+            raise ValueError(
+                f"{mr_name}: column_map bdf_unit {rc.bdf_unit!r} does not match "
+                f"BDF unit {unit!r}"
+            )
+        if rc.source_header in seen_headers:
+            raise ValueError(
+                f"MATReader.column_map: duplicate source_header {rc.source_header!r}"
+            )
+        seen_headers.add(rc.source_header)
+        kwargs[mr_name] = rc
+    if not kwargs:
+        raise ValueError("MATReader requires a non-empty column_map")
+    return Normalizer(**kwargs)
 
 
 class MATReader(BaseReader):
@@ -431,37 +412,27 @@ class MATReader(BaseReader):
 
     kind: ClassVar[str] = "mat"
 
-    column_map: dict[BDFColumn, ResolvedColumn] = Field(default_factory=dict)
+    normalizer: Normalizer = Field(default_factory=Normalizer)
     variable_names: list[str] | None = None
 
-    @field_validator("column_map", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _coerce_column_map(cls, v: Any) -> Any:
-        if not isinstance(v, dict):
-            return v
-        out: dict[BDFColumn, ResolvedColumn] = {}
-        for k, val in v.items():
-            col = _coerce_bdfcolumn_key(k)
-            out[col] = _coerce_resolved_value(val, col)
-        return out
+    def _coerce_column_map(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        column_map = data.pop("column_map", None)
+        if column_map is not None:
+            normalizer = _build_mat_normalizer(column_map)
+            data["normalizer"] = normalizer
+            data.setdefault("source", Source(id="mat", normalizer=normalizer, metadata=MetadataParser()))
+        return data
 
     @model_validator(mode="after")
-    def _check_column_map(self) -> "MATReader":
-        if not self.column_map:
+    def _validate_normalizer(self) -> "MATReader":
+        if not any(True for _ in self.normalizer):
             raise ValueError("MATReader requires a non-empty column_map")
-        seen: dict[str, BDFColumn] = {}
-        for col, rc in self.column_map.items():
-            if rc.bdf_unit and rc.bdf_unit != col.unit:
-                raise ValueError(
-                    f"{col.name}: column_map bdf_unit {rc.bdf_unit!r} does not match "
-                    f"BDFColumn unit {col.unit!r}"
-                )
-            if rc.source_header in seen:
-                raise ValueError(
-                    f"MATReader.column_map: duplicate source_header {rc.source_header!r} "
-                    f"used by {seen[rc.source_header].name} and {col.name}"
-                )
-            seen[rc.source_header] = col
+        if self.source is None:
+            object.__setattr__(self, "source", Source(id="mat", normalizer=self.normalizer, metadata=MetadataParser()))
         return self
 
     def _parse(self, path: Path) -> tuple[pl.LazyFrame, list[str]]:
@@ -472,14 +443,15 @@ class MATReader(BaseReader):
             raise RuntimeError(
                 "MATReader requires scipy. Install with `pip install scipy`."
             ) from exc
+        rc_entries = [rc for _, rc in self.normalizer if isinstance(rc, ResolvedColumn)]
         var_names = (
             self.variable_names
             if self.variable_names is not None
-            else [rc.source_header for rc in self.column_map.values()]
+            else [rc.source_header for rc in rc_entries]
         )
         mat = loadmat(str(path), variable_names=var_names, squeeze_me=True)
         data: dict[str, Any] = {}
-        for col, rc in self.column_map.items():
+        for rc in rc_entries:
             if rc.source_header not in mat:
                 raise ValueError(
                     f"MATReader: variable {rc.source_header!r} not found in {path}"
@@ -490,48 +462,9 @@ class MATReader(BaseReader):
                     f"MATReader: variable {rc.source_header!r} has shape "
                     f"{arr.shape} after squeeze; must be 1-D"
                 )
-            data[col.mr_name] = arr.astype(np.float64)
+            data[rc.source_header] = arr.astype(np.float64)
         df = pl.DataFrame(data)
         return df.lazy(), []
-
-    def read(
-        self,
-        path: str | Path,
-        *,
-        lazy: bool = False,
-        column_map: dict[str, str] | None = None,
-    ) -> tuple[pl.DataFrame | pl.LazyFrame, dict]:
-        path = Path(path)
-        lf, _ = self._parse(path)
-        exprs: list[pl.Expr] = []
-        meta: dict = {"source": f"mat:{path.stem}", "columns": {}}
-        for col, rc in self.column_map.items():
-            if not self.include_optional and not col.required:
-                continue
-            expr = pl.col(col.mr_name)
-            if rc.offset != 0.0:
-                expr = expr + rc.offset
-            if rc.scale != 1.0:
-                expr = expr * rc.scale
-            if col.dtype == "int":
-                expr = expr.cast(pl.Int64, strict=False)
-            exprs.append(expr.alias(col.mr_name))
-            meta["columns"][col.mr_name] = {
-                "source_header": rc.source_header,
-                "source_unit": rc.bdf_unit,
-                "bdf_unit": rc.bdf_unit,
-                "scale": rc.scale,
-                "offset": rc.offset,
-                "datetime_fmt": None,
-            }
-        if self.extra_columns:
-            for src, out in self.extra_columns.items():
-                if src in lf.collect_schema().names():
-                    exprs.append(pl.col(src).alias(out))
-        result_lf = lf.select(exprs)
-        if lazy:
-            return result_lf, meta
-        return result_lf.collect(), meta
 
 
 __all__ = ["BaseReader", "CSVReader", "ExcelReader", "MATReader"]

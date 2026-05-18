@@ -11,7 +11,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from bdf2.readers import CSVReader, ExcelReader, MATReader  # noqa: E402
-from bdf2.schema import BDFColumn, Normalizer, ResolvedColumn
+from bdf2.schema import Normalizer, ResolvedColumn, Source
 
 SAMPLE_DATA = Path(__file__).parent.parent.parent / "sample_data"
 
@@ -28,7 +28,7 @@ def test_csvreader_defaults_none():
 
 def test_csvreader_source_string_coerced():
     r = CSVReader(source="biologic_mpt")
-    assert isinstance(r.source, Normalizer)
+    assert isinstance(r.source, Source)
     assert r.source.id == "biologic_mpt"
 
 
@@ -145,8 +145,8 @@ def test_matreader_empty_column_map_rejected():
 
 
 def test_matreader_string_shorthand_coerced():
-    r = MATReader(column_map={BDFColumn.VOLTAGE_VOLT: "v_cell"})
-    rc = r.column_map[BDFColumn.VOLTAGE_VOLT]
+    r = MATReader(column_map={"voltage_volt": "v_cell"})
+    rc = r.normalizer.voltage_volt
     assert isinstance(rc, ResolvedColumn)
     assert rc.source_header == "v_cell"
     assert rc.scale == 1.0
@@ -154,38 +154,46 @@ def test_matreader_string_shorthand_coerced():
 
 
 def test_matreader_tuple2_coerced():
-    r = MATReader(column_map={BDFColumn.CURRENT_AMPERE: ("i_meas", 0.001)})
-    rc = r.column_map[BDFColumn.CURRENT_AMPERE]
+    r = MATReader(column_map={"current_ampere": ("i_meas", 0.001)})
+    rc = r.normalizer.current_ampere
+    assert isinstance(rc, ResolvedColumn)
     assert rc.scale == pytest.approx(0.001)
     assert rc.offset == 0.0
 
 
 def test_matreader_tuple3_coerced():
     r = MATReader(column_map={
-        BDFColumn.AMBIENT_TEMPERATURE_CELSIUS: ("temp_k", 1.0, -273.15),
+        "ambient_temperature_celsius": ("temp_k", 1.0, -273.15),
     })
-    rc = r.column_map[BDFColumn.AMBIENT_TEMPERATURE_CELSIUS]
+    rc = r.normalizer.ambient_temperature_celsius
+    assert isinstance(rc, ResolvedColumn)
     assert rc.offset == pytest.approx(-273.15)
 
 
 def test_matreader_resolvedcolumn_direct():
     rc_in = ResolvedColumn(source_header="v", bdf_unit="V", scale=1.0, offset=0.0)
-    r = MATReader(column_map={BDFColumn.VOLTAGE_VOLT: rc_in})
-    assert r.column_map[BDFColumn.VOLTAGE_VOLT] == rc_in
+    r = MATReader(column_map={"voltage_volt": rc_in})
+    assert r.normalizer.voltage_volt == rc_in
 
 
 def test_matreader_mismatched_bdf_unit_rejected():
     bad = ResolvedColumn(source_header="x", bdf_unit="A", scale=1.0, offset=0.0)
     with pytest.raises((ValueError, ValidationError, TypeError)):
-        MATReader(column_map={BDFColumn.VOLTAGE_VOLT: bad})
+        MATReader(column_map={"voltage_volt": bad})
 
 
 def test_matreader_duplicate_source_header_rejected():
     with pytest.raises((ValueError, ValidationError, TypeError)):
         MATReader(column_map={
-            BDFColumn.VOLTAGE_VOLT: "x",
-            BDFColumn.CURRENT_AMPERE: "x",
+            "voltage_volt": "x",
+            "current_ampere": "x",
         })
+
+
+def test_matreader_normalizer_attribute():
+    r = MATReader(column_map={"voltage_volt": "v"})
+    assert isinstance(r.normalizer, Normalizer)
+    assert isinstance(r.normalizer.voltage_volt, ResolvedColumn)
 
 
 def test_matreader_read_smoke(tmp_path):
@@ -194,8 +202,8 @@ def test_matreader_read_smoke(tmp_path):
     p = tmp_path / "x.mat"
     scipy_io.savemat(p, {"v": np.array([3.5, 3.6]), "i": np.array([1000.0, 2000.0])})
     r = MATReader(column_map={
-        BDFColumn.VOLTAGE_VOLT: "v",
-        BDFColumn.CURRENT_AMPERE: ("i", 0.001),
+        "voltage_volt": "v",
+        "current_ampere": ("i", 0.001),
     })
     df, meta = r.read(p)
     assert df["voltage_volt"][0] == pytest.approx(3.5)
@@ -207,6 +215,6 @@ def test_matreader_read_lazy(tmp_path):
     import numpy as np
     p = tmp_path / "x.mat"
     scipy_io.savemat(p, {"v": np.array([3.5])})
-    r = MATReader(column_map={BDFColumn.VOLTAGE_VOLT: "v"})
+    r = MATReader(column_map={"voltage_volt": "v"})
     lf, _ = r.read(p, lazy=True)
     assert isinstance(lf, pl.LazyFrame)

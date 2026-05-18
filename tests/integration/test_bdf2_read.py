@@ -9,10 +9,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from bdf2 import CSVReader, read
-from bdf2.schema import BDFColumn
+from bdf2.schema import _SPEC_COLUMNS
 
 SAMPLE_DATA = Path(__file__).parent.parent.parent / "sample_data"
-MR_NAMES = {c.mr_name for c in BDFColumn}
+MR_NAMES = set(_SPEC_COLUMNS.keys())
 
 
 def _assert_bdf(df, meta, source_id, required_mr_names):
@@ -70,17 +70,12 @@ def test_read_lazy_returns_lazyframe():
 
 def test_read_basytec_preamble_metadata():
     _, meta = read(SAMPLE_DATA / "basytec" / "sample_data_basytec.txt", source="basytec_txt")
-    assert "start_datetime" in meta or "channel" in meta
+    assert "start_time" in meta
 
 
 def test_read_biologic_preamble_metadata():
     _, meta = read(SAMPLE_DATA / "biologic" / "Sample_data_biologic_01_MB_CA1.txt")
-    assert "acquisition_started" in meta or "channel" in meta
-
-
-def test_read_novonix_metadata_channel():
-    _, meta = read(SAMPLE_DATA / "novonix" / "sample_data_novonix.csv")
-    assert "channel" in meta
+    assert "start_time" in meta
 
 
 @pytest.mark.parametrize("path", [
@@ -119,4 +114,4 @@ def test_read_include_optional_false():
     )
     for c in df.columns:
         if c in MR_NAMES:
-            assert BDFColumn[c.upper()].required, c
+            assert _SPEC_COLUMNS[c]["required"], c

@@ -9,11 +9,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from bdf2 import normalize
-from bdf2._normalize import _sniff_decimal
-from bdf2.schema import BDFColumn
+from bdf2.schema import _SPEC_COLUMNS, _sniff_decimal
 from bdf2.sources import BIOLOGIC_MPT
 
-MR_NAMES = {c.mr_name for c in BDFColumn}
+MR_NAMES = set(_SPEC_COLUMNS.keys())
 
 
 def test_normalize_basytec_rename():
