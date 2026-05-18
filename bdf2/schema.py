@@ -1,4 +1,4 @@
-"""Typed BDF schema: Syn/DateTimeSyn, ResolvedColumn, Normalizer, Source, MetadataParser."""
+"""Typed BDF schema: Syn, DateTimeSyn, ResolvedColumn, Normalizer, Source, MetadataParser."""
 
 from __future__ import annotations
 
@@ -6,18 +6,16 @@ import contextlib
 import logging
 import re
 import warnings
-from enum import Enum
-from typing import Annotated, Any, Iterator, Literal
+from typing import Any, Iterator
 
 import pint
 import polars as pl
 from pydantic import (
     BaseModel,
     ConfigDict,
-    Discriminator,
     Field,
     PrivateAttr,
-    model_validator,
+    RootModel,
 )
 
 from bdf.normalize.spec import COLUMNS as _SPEC_COLUMNS
@@ -46,77 +44,48 @@ def _col_dtype(mr_name: str) -> str:
     return "int" if _col_unit(mr_name) == "1" else "float"
 
 
-class Style(str, Enum):
-    BRACKETS = "BRACKETS"
-    PARENS = "PARENS"
-    SLASH = "SLASH"
-    NONE = "NONE"
-
-
 _BRACKETS_RE = re.compile(r"^\s*(.+?)\s*\[([^\]]+)\]\s*$")
 _PARENS_RE = re.compile(r"^\s*(.+?)\s*\(([^)]+)\)\s*$")
 _SLASH_RE = re.compile(r"^\s*(.+?)\s*/\s*(.+?)\s*$")
 
-
-def _parse_styled(header: str) -> list[tuple[Style, str, str | None]]:
-    """Return all (style, qty, unit) tuples that match `header`. NONE always last."""
-    out: list[tuple[Style, str, str | None]] = []
-    m = _BRACKETS_RE.match(header)
-    if m:
-        out.append((Style.BRACKETS, m.group(1), m.group(2)))
-    m = _PARENS_RE.match(header)
-    if m:
-        out.append((Style.PARENS, m.group(1), m.group(2)))
-    m = _SLASH_RE.match(header)
-    if m:
-        out.append((Style.SLASH, m.group(1), m.group(2)))
-    out.append((Style.NONE, header.strip(), None))
-    return out
+_UNIT_CAPTURE = r"([A-Za-z0-9./]+)"
 
 
-class Syn(BaseModel):
+def _extract_unit(header: str) -> str | None:
+    """Extract unit string from bracket/parens/slash-style header."""
+    m = _BRACKETS_RE.match(header) or _PARENS_RE.match(header) or _SLASH_RE.match(header)
+    return m.group(2).strip() if m else None
+
+
+class Syn(RootModel[str]):
     """A numeric column synonym declared by exemplar header."""
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["numeric"] = "numeric"
-    exemplar: str
-    qty: str
-    style: Style
-    unit: str | None
+    @property
+    def exemplar(self) -> str:
+        return self.root
 
-    @classmethod
-    def parse(cls, exemplar: str) -> "Syn":
-        m = _BRACKETS_RE.match(exemplar)
-        if m:
-            return cls(exemplar=exemplar, qty=m.group(1).strip(), style=Style.BRACKETS, unit=m.group(2).strip())
-        m = _PARENS_RE.match(exemplar)
-        if m:
-            return cls(exemplar=exemplar, qty=m.group(1).strip(), style=Style.PARENS, unit=m.group(2).strip())
-        m = _SLASH_RE.match(exemplar)
-        if m:
-            return cls(exemplar=exemplar, qty=m.group(1).strip(), style=Style.SLASH, unit=m.group(2).strip())
-        return cls(exemplar=exemplar, qty=exemplar.strip(), style=Style.NONE, unit=None)
+    def match(self, header: str) -> str | None:
+        """Return captured unit string on match, '' for no-unit match, None on no match."""
+        if "{unit}" in self.root:
+            parts = self.root.split("{unit}")
+            pattern = _UNIT_CAPTURE.join(re.escape(p) for p in parts)
+            m = re.fullmatch(pattern, header, re.IGNORECASE)
+            return m.group(1) if m else None
+        return "" if self.root.strip().lower() == header.strip().lower() else None
 
 
 class DateTimeSyn(BaseModel):
-    """A datetime column synonym matched by exemplar equality with a strftime format."""
+    """A datetime column synonym: one header synonym plus ordered format strings to try."""
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["datetime"] = "datetime"
-    exemplar: str
-    qty: str = ""
-    fmt: str
-
-    @model_validator(mode="after")
-    def _fill_qty(self) -> "DateTimeSyn":
-        if not self.qty:
-            object.__setattr__(self, "qty", self.exemplar)
-        return self
+    syn: Syn
+    fmts: tuple[str, ...]
 
 
-SynUnion = Annotated[Syn | DateTimeSyn, Discriminator("kind")]
+SynUnion = Syn | DateTimeSyn
 
 
 class ResolvedColumn(BaseModel):
@@ -128,7 +97,7 @@ class ResolvedColumn(BaseModel):
     bdf_unit: str | None = None
     scale: float = 1.0
     offset: float = 0.0
-    datetime_fmt: str | None = None
+    datetime_fmts: tuple[str, ...] = ()
 
 
 _UNIT_FIXUPS = {
@@ -213,10 +182,13 @@ def _build_expr(
     decimal: str,
 ) -> pl.Expr:
     src = rc.source_header
-    if rc.datetime_fmt is not None:
+    if rc.datetime_fmts:
+        candidates = [
+            pl.col(src).str.to_datetime(fmt, strict=False)
+            for fmt in rc.datetime_fmts
+        ]
         expr = (
-            pl.col(src)
-            .str.to_datetime(rc.datetime_fmt, strict=False)
+            (pl.coalesce(candidates) if len(candidates) > 1 else candidates[0])
             .dt.timestamp("ms")
             .cast(pl.Float64) / 1000.0
         )
@@ -235,11 +207,7 @@ def _build_expr(
 
 
 def _resolved_from_column_map_value(mr_name: str, src_header: str) -> ResolvedColumn:
-    src_unit: str | None = None
-    for style, _qty, unit in _parse_styled(src_header):
-        if style != Style.NONE and unit is not None:
-            src_unit = unit
-            break
+    src_unit = _extract_unit(src_header)
     bdf_unit = _col_unit(mr_name)
     if src_unit is None:
         scale = 1.0
@@ -260,46 +228,41 @@ def _resolved_from_column_map_value(mr_name: str, src_header: str) -> ResolvedCo
         bdf_unit=bdf_unit,
         scale=scale,
         offset=0.0,
-        datetime_fmt=None,
     )
 
 
 def _match_header(
     header: str,
     probe: str,
-    styled: list[tuple[Style, str, str | None]],
     bdf_unit: str,
-    synonyms: list[Syn | DateTimeSyn],
+    synonyms: list[SynUnion],
 ) -> ResolvedColumn | None:
     for syn in synonyms:
         if isinstance(syn, DateTimeSyn):
-            if probe.lower() == syn.exemplar.strip().lower():
+            if syn.syn.root.strip().lower() == probe.strip().lower():
                 return ResolvedColumn(
                     source_header=header,
                     bdf_unit=bdf_unit,
                     scale=1.0,
                     offset=0.0,
-                    datetime_fmt=syn.fmt,
+                    datetime_fmts=syn.fmts,
                 )
             continue
-        for style, qty, unit in styled:
-            if style != syn.style:
+        captured = syn.match(probe)
+        if captured is None:
+            continue
+        if captured == "":
+            factor = 1.0
+        else:
+            factor = _pint_scale(captured, bdf_unit)
+            if factor is None:
                 continue
-            if qty.strip().lower() != syn.qty.strip().lower():
-                continue
-            if syn.style == Style.NONE:
-                factor = 1.0
-            else:
-                factor = _pint_scale(unit, bdf_unit)
-                if factor is None:
-                    continue
-            return ResolvedColumn(
-                source_header=header,
-                bdf_unit=bdf_unit,
-                scale=factor,
-                offset=0.0,
-                datetime_fmt=None,
-            )
+        return ResolvedColumn(
+            source_header=header,
+            bdf_unit=bdf_unit,
+            scale=factor,
+            offset=0.0,
+        )
     return None
 
 
@@ -342,27 +305,7 @@ class Normalizer(BaseModel):
     temperature_t4_celsius: list[SynUnion] | ResolvedColumn | None = None
     temperature_t5_celsius: list[SynUnion] | ResolvedColumn | None = None
 
-    @model_validator(mode="after")
-    def _check_syn_units(self) -> "Normalizer":
-        for mr_name in type(self).model_fields:
-            spec = getattr(self, mr_name)
-            if spec is None or isinstance(spec, ResolvedColumn):
-                continue
-            unit = _col_unit(mr_name)
-            for syn in spec:
-                if isinstance(syn, DateTimeSyn):
-                    continue
-                if syn.unit is None:
-                    continue
-                factor = _pint_scale(syn.unit, unit)
-                if factor is None:
-                    raise ValueError(
-                        f"Normalizer: {mr_name} synonym {syn.exemplar!r} "
-                        f"unit {syn.unit!r} is not pint-compatible with {unit!r}"
-                    )
-        return self
-
-    def __iter__(self) -> Iterator[tuple[str, list[Syn | DateTimeSyn] | ResolvedColumn]]:  # type: ignore[override]
+    def __iter__(self) -> Iterator[tuple[str, list[SynUnion] | ResolvedColumn]]:  # type: ignore[override]
         for mr_name in type(self).model_fields:
             val = getattr(self, mr_name)
             if val is not None:
@@ -371,7 +314,6 @@ class Normalizer(BaseModel):
     def score(self, headers: list[str]) -> int:
         """Count how many headers match via synonym scanning (ResolvedColumn fields skipped)."""
         probes = {h: h.strip().lstrip("~").strip() for h in headers}
-        styled_map = {h: _parse_styled(probes[h]) for h in headers}
         claimed: set[str] = set()
         count = 0
         for mr_name, spec in self:
@@ -381,7 +323,7 @@ class Normalizer(BaseModel):
             for header in headers:
                 if header in claimed:
                     continue
-                if _match_header(header, probes[header], styled_map[header], unit, spec) is not None:
+                if _match_header(header, probes[header], unit, spec) is not None:
                     claimed.add(header)
                     count += 1
                     break
@@ -401,7 +343,6 @@ class Normalizer(BaseModel):
         headers = list(schema.names())
 
         probes = {h: h.strip().lstrip("~").strip() for h in headers}
-        styled_map = {h: _parse_styled(probes[h]) for h in headers}
 
         resolved: dict[str, ResolvedColumn] = {}
         claimed: set[str] = set()
@@ -416,7 +357,7 @@ class Normalizer(BaseModel):
                 for header in headers:
                     if header in claimed:
                         continue
-                    matched = _match_header(header, probes[header], styled_map[header], unit, spec)
+                    matched = _match_header(header, probes[header], unit, spec)
                     if matched is not None:
                         resolved[mr_name] = matched
                         claimed.add(header)
@@ -445,18 +386,17 @@ class Normalizer(BaseModel):
                 )
                 continue
             src_unit: str | None = None
-            if rc.datetime_fmt is None:
-                for style, _qty, unit in _parse_styled(rc.source_header):
-                    if style != Style.NONE and unit is not None:
-                        src_unit = _norm_unit(unit)
-                        break
+            if not rc.datetime_fmts:
+                raw_unit = _extract_unit(rc.source_header)
+                if raw_unit is not None:
+                    src_unit = _norm_unit(raw_unit)
             columns_meta[mr_name] = {
                 "source_header": rc.source_header,
                 "source_unit": src_unit,
                 "bdf_unit": rc.bdf_unit,
                 "scale": rc.scale,
                 "offset": rc.offset,
-                "datetime_fmt": rc.datetime_fmt,
+                "datetime_fmts": rc.datetime_fmts,
             }
             exprs.append(_build_expr(mr_name, rc, dict(schema), decimal))
 
@@ -486,7 +426,6 @@ class Source(BaseModel):
     id: str
     magic: tuple[str, ...] = ()
     exts: tuple[str, ...] = ()
-    datetime_formats: tuple[str, ...] = ()
     metadata: MetadataParser = Field(default_factory=MetadataParser)
     normalizer: Normalizer
 
@@ -504,7 +443,6 @@ class Source(BaseModel):
 
 
 __all__ = [
-    "Style",
     "Syn",
     "DateTimeSyn",
     "SynUnion",
@@ -519,7 +457,7 @@ __all__ = [
     "_sniff_decimal",
     "_pint_scale",
     "_norm_unit",
-    "_parse_styled",
+    "_extract_unit",
     "_match_header",
     "_build_expr",
     "_resolved_from_column_map_value",

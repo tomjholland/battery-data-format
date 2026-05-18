@@ -20,7 +20,6 @@ from .schema import (
     Normalizer,
     ResolvedColumn,
     Source,
-    Style,
     Syn,
     SynUnion,
 )
@@ -39,7 +38,6 @@ __all__ = [
     "REGISTRY",
     "ResolvedColumn",
     "Source",
-    "Style",
     "Syn",
     "SynUnion",
     "get_normalizer",
