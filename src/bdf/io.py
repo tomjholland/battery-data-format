@@ -7,12 +7,15 @@ import json
 import re
 import warnings
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pandas as pd
 import polars as pl
 
 from bdf import spec
 from bdf.plugins import PLUGINS, Plugin, detect
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 def read(
@@ -254,6 +257,8 @@ def _legacy_is_numeric(s: pd.Series) -> bool:
     Returns:
         True if the series dtype is numeric.
     """
+    import pandas as pd
+
     return pd.api.types.is_numeric_dtype(s)
 
 
@@ -270,6 +275,8 @@ def _legacy_coalesce(target: pd.Series, incoming: pd.Series) -> pd.Series:
         Merged series: ``incoming`` outright if it is numeric and ``target`` isn't,
         otherwise ``target`` with nulls filled from ``incoming``.
     """
+    import pandas as pd
+
     tnum, inum = _legacy_is_numeric(target), _legacy_is_numeric(incoming)
     if inum and not tnum:
         with contextlib.suppress(Exception):
@@ -297,6 +304,8 @@ def canonicalize_legacy_labels(
     Returns:
         Tuple of (new_df, legacy_headers_used).
     """
+    import pandas as pd
+
     out = df.copy()
     legacy_headers: list[str] = []
 
@@ -385,6 +394,8 @@ def load(pathlike) -> pd.DataFrame:
         ValueError: If the format is unsupported, or parsing fails for any reason
             (re-raised with a short, path-sanitized message).
     """
+    import pandas as pd
+
     p = Path(pathlike)
     if not p.exists():
         raise FileNotFoundError(p.name)
