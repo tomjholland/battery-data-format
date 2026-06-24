@@ -17,7 +17,6 @@ from . import (
 from .io import load as load_bdf, save as save_bdf
 from .metadata import Creator, Dataset, RelatedIdentifier, save_jsonld
 from .repair import clean as clean_bdf
-from .visualize import plot as line_plot
 
 app = typer.Typer(help="Battery Data Format utilities")
 
@@ -301,6 +300,8 @@ def plot(
     """
     Plot a BDF-normalized dataset. If the file isn't already BDF, auto-detect and convert on the fly.
     """
+    from .visualize import plot as line_plot
+
     p = Path(path)
     if not p.exists():
         raise typer.BadParameter(f"File not found: {p}")
