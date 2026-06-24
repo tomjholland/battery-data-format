@@ -6,17 +6,50 @@ import warnings
 
 # mypy: ignore-errors
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
-
-import pandas as pd
 
 # light imports that never cause cycles
 from .io import load, read, save  # spec-driven reader/serializer (the public read())
 from .plugins import detect  # spec-driven detection -> (plugin_id, Plugin)
-from .repair import CleanReport, clean  # public cleaning helpers
 from .table_normalizers import normalize  # spec-driven column normalizer
-from .validate import BDFValidationError, validate_df  # error type + df validator, re-exported at top level
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from .repair import CleanReport, clean  # public cleaning helpers; needs the [legacy] extra (pandas/numpy)
+    from .validate import BDFValidationError, validate_df  # needs the [legacy] extra (pandas/numpy)
+
+# CleanReport/clean/BDFValidationError/validate_df are pandas-based (the [legacy] extra) and are
+# loaded lazily via __getattr__ below so `import bdf` itself stays pandas-free.
+_LAZY_ATTRS = {
+    "CleanReport": (".repair", "CleanReport"),
+    "clean": (".repair", "clean"),
+    "BDFValidationError": (".validate", "BDFValidationError"),
+    "validate_df": (".validate", "validate_df"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = target
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), attr_name)
+    globals()[name] = value
+
+    # Importing a submodule whose name collides with a function defined in this
+    # module (bdf.validate, bdf.templates) overwrites that function on the package
+    # object. Restore the originals, captured once at module load time below.
+    if name in ("BDFValidationError", "validate_df"):
+        globals()["validate"] = _ORIG_VALIDATE
+    if name == "templates":
+        globals()["templates"] = _ORIG_TEMPLATES
+
+    return value
+
 
 __all__ = [
     # core I/O
@@ -328,108 +361,117 @@ def validate(
         {"ok": True, "issues": [...]}   or   {"ok": False, "kind": "...", "detail": "..."}
     """
 
-    # small local helpers (kept inside to avoid extra imports at module load time)
-    def _bad_report(kind: str, detail: str, **extra):
-        r = {"ok": False, "kind": kind, "detail": detail}
-        if extra:
-            r.update(extra)
-        if report:
-            print(f"Validation failed: {detail}")
-        if raise_on_error:
-            from .validate import BDFValidationError
+    _self = validate
 
-            raise BDFValidationError(detail)
-        return r
+    try:
+        # small local helpers (kept inside to avoid extra imports at module load time)
+        def _bad_report(kind: str, detail: str, **extra):
+            r = {"ok": False, "kind": kind, "detail": detail}
+            if extra:
+                r.update(extra)
+            if report:
+                print(f"Validation failed: {detail}")
+            if raise_on_error:
+                from .validate import BDFValidationError
 
-    # Direct DataFrame path
-    if isinstance(obj, pd.DataFrame):
-        from .validate import validate_df
+                raise BDFValidationError(detail)
+            return r
 
-        return validate_df(obj, report=report, raise_on_error=raise_on_error)
-
-    # Resolve path/URL/registry id to a local path
-    if isinstance(obj, (str, Path)):
-        from .__init__ import _resolve_source  # local helper already in your package
-
-        local_path, _ = _resolve_source(obj, registry_path=registry_path)
-        p = Path(local_path)
-        fname = p.name
-
-        # Only attempt to load files that look like BDF artifacts
-        def _looks_like_bdf_artifact(path: Path) -> bool:
-            # quick filename hint: *.bdf.csv, *.bdf.parquet, *.bdf.feather, *.bdf.json(.gz)
-            name_lc = path.name.lower()
-            if any(
-                name_lc.endswith(suf)
-                for suf in (
-                    ".bdf.csv",
-                    ".bdf.csv.gz",
-                    ".bdf.parquet",
-                    ".bdf.feather",
-                    ".bdf.json",
-                    ".bdf.json.gz",
-                )
-            ):
-                return True
-            # header sniff for CSV only (cheap and safe)
-            if name_lc.endswith(".csv") or name_lc.endswith(".csv.gz"):
-                try:
-                    with (
-                        gzip.open(path, "rt")
-                        if name_lc.endswith(".gz")
-                        else open(path, encoding="utf-8", errors="ignore")
-                    ) as f:
-                        head = "".join([f.readline() for _ in range(2)]).lower()
-                    header_line = head.splitlines()[0] if head else ""
-                    cols_l = {c.strip().lower() for c in header_line.split(",")}
-                    from . import spec
-
-                    for _, quantity_spec in spec.COLUMN_ONTOLOGY:
-                        if not quantity_spec.required or quantity_spec.deprecated:
-                            continue
-                        pref = quantity_spec.formatted_label.lower()
-                        notation = quantity_spec.effective_notation.lower()
-                        if pref not in cols_l and notation not in cols_l:
-                            return False
-                    return True
-                except Exception:
-                    return False
-            return False
-
-        # Optional gzip import for header sniff
-        import gzip as _maybe_gzip  # safe alias
-
-        gzip = _maybe_gzip
-
-        if not _looks_like_bdf_artifact(p):
-            return _bad_report(
-                kind="not_bdf_artifact",
-                detail=f"{fname} does not look like a BDF artifact (expected .bdf.<ext> or a BDF-style header).",
-                file=fname,
-            )
-
-        # Try to load with strict BDF IO (no transformations)
+        # Direct DataFrame path (pandas is optional; skip the check if it isn't installed)
         try:
-            from .io import load as _load_bdf  # strict loader for BDF CSV/Parquet/Feather/JSON
+            import pandas as pd
+        except ImportError:
+            pd = None
+        if pd is not None and isinstance(obj, pd.DataFrame):
+            from .validate import validate_df
 
-            df = _load_bdf(p)
-        except Exception as e:
-            return _bad_report(
-                kind="io_error",
-                detail=f"Failed to load BDF artifact {fname}: {e}",
-                file=fname,
-            )
+            return validate_df(obj, report=report, raise_on_error=raise_on_error)
 
-        # Validate columns/units only; do NOT normalize or modify
-        from .validate import validate_df
+        # Resolve path/URL/registry id to a local path
+        if isinstance(obj, (str, Path)):
+            from .__init__ import _resolve_source  # local helper already in your package
 
-        return validate_df(df, report=report, raise_on_error=raise_on_error)
+            local_path, _ = _resolve_source(obj, registry_path=registry_path)
+            p = Path(local_path)
+            fname = p.name
 
-    # Anything else: wrong type
-    return _bad_report(
-        kind="type_error",
-        detail="validate() expects a pandas DataFrame, a file path (str/Path), a URL, or a dataset id.",
-    )
+            # Only attempt to load files that look like BDF artifacts
+            def _looks_like_bdf_artifact(path: Path) -> bool:
+                # quick filename hint: *.bdf.csv, *.bdf.parquet, *.bdf.feather, *.bdf.json(.gz)
+                name_lc = path.name.lower()
+                if any(
+                    name_lc.endswith(suf)
+                    for suf in (
+                        ".bdf.csv",
+                        ".bdf.csv.gz",
+                        ".bdf.parquet",
+                        ".bdf.feather",
+                        ".bdf.json",
+                        ".bdf.json.gz",
+                    )
+                ):
+                    return True
+                # header sniff for CSV only (cheap and safe)
+                if name_lc.endswith(".csv") or name_lc.endswith(".csv.gz"):
+                    try:
+                        with (
+                            gzip.open(path, "rt")
+                            if name_lc.endswith(".gz")
+                            else open(path, encoding="utf-8", errors="ignore")
+                        ) as f:
+                            head = "".join([f.readline() for _ in range(2)]).lower()
+                        header_line = head.splitlines()[0] if head else ""
+                        cols_l = {c.strip().lower() for c in header_line.split(",")}
+                        from . import spec
+
+                        for _, quantity_spec in spec.COLUMN_ONTOLOGY:
+                            if not quantity_spec.required or quantity_spec.deprecated:
+                                continue
+                            pref = quantity_spec.formatted_label.lower()
+                            notation = quantity_spec.effective_notation.lower()
+                            if pref not in cols_l and notation not in cols_l:
+                                return False
+                        return True
+                    except Exception:
+                        return False
+                return False
+
+            # Optional gzip import for header sniff
+            import gzip as _maybe_gzip  # safe alias
+
+            gzip = _maybe_gzip
+
+            if not _looks_like_bdf_artifact(p):
+                return _bad_report(
+                    kind="not_bdf_artifact",
+                    detail=f"{fname} does not look like a BDF artifact (expected .bdf.<ext> or a BDF-style header).",
+                    file=fname,
+                )
+
+            # Try to load with strict BDF IO (no transformations)
+            try:
+                from .io import load as _load_bdf  # strict loader for BDF CSV/Parquet/Feather/JSON
+
+                df = _load_bdf(p)
+            except Exception as e:
+                return _bad_report(
+                    kind="io_error",
+                    detail=f"Failed to load BDF artifact {fname}: {e}",
+                    file=fname,
+                )
+
+            # Validate columns/units only; do NOT normalize or modify
+            from .validate import validate_df
+
+            return validate_df(df, report=report, raise_on_error=raise_on_error)
+
+        # Anything else: wrong type
+        return _bad_report(
+            kind="type_error",
+            detail="validate() expects a pandas DataFrame, a file path (str/Path), a URL, or a dataset id.",
+        )
+    finally:
+        globals()["validate"] = _self
 
 
 # ----- dataset helpers (lazy to avoid cycles) -----
@@ -486,6 +528,14 @@ def templates(*names, root: str | Path = ".", overwrite: bool = False):
         return mod.templates(*names, root=root, overwrite=overwrite)
     finally:
         globals()["templates"] = _self
+
+
+# Captured once at module load time so the lazy `__getattr__` above (and the
+# self-healing wrappers on validate()/templates() themselves) can restore these
+# functions after a submodule import of the same name (bdf.validate, bdf.templates)
+# clobbers the package attribute.
+_ORIG_VALIDATE = validate
+_ORIG_TEMPLATES = templates
 
 
 def plot(*args, **kwargs):
