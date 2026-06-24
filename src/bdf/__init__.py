@@ -17,10 +17,10 @@ from .table_normalizers import normalize  # spec-driven column normalizer
 if TYPE_CHECKING:
     import pandas as pd
 
-    from .repair import CleanReport, clean  # public cleaning helpers; needs the [legacy] extra (pandas/numpy)
-    from .validate import BDFValidationError, validate_df  # needs the [legacy] extra (pandas/numpy)
+    from .repair import CleanReport, clean  # public cleaning helpers; needs the [pandas] extra (pandas/numpy)
+    from .validate import BDFValidationError, validate_df  # needs the [pandas] extra (pandas/numpy)
 
-# CleanReport/clean/BDFValidationError/validate_df are pandas-based (the [legacy] extra) and are
+# CleanReport/clean/BDFValidationError/validate_df are pandas-based (the [pandas] extra) and are
 # loaded lazily via __getattr__ below so `import bdf` itself stays pandas-free.
 _LAZY_ATTRS = {
     "CleanReport": (".repair", "CleanReport"),

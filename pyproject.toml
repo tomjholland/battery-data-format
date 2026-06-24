@@ -24,22 +24,14 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-  "numpy>=1.24,<3.0",
-  "pandas>=2.0",
-  "pyarrow>=15.0",
-  "rdflib>=7.0",
-  "typer>=0.12",
-  "rich>=13.7",
-  "matplotlib>=3.8",
-  "plotly",
-  "nbformat>=4.2",
-  "openpyxl>=3.1",
-  "pydantic>=2.6",
-  "requests>=2.31",
-  "pint>=0.22",
-  "NewareNDA",
-  "platformdirs>=4.10.0",
+  # core: bdf.read / bdf.detect / bdf.normalize and the ontology (bdf.spec)
   "polars>=1.41.2",
+  "pyarrow>=15.0",  # polars' interchange/IO backend for several formats
+  "pydantic>=2.6",
+  "pint>=0.22",
+  "rdflib>=7.0",
+  "requests>=2.31",
+  "platformdirs>=4.10.0",
 ]
 
 [project.urls]
@@ -50,16 +42,18 @@ Issues   = "https://github.com/battery-data-alliance/battery-data-format/issues"
 bdf = "bdf.cli:app"
 bdf-update-snapshot = "bdf.spec:_update_snapshot_cli"
 
-[project.entry-points."bdf.data_sources"]
-biologic-mpt = "bdf.data_sources.biologic_mpt:BioLogicMPT"
-neware-csv   = "bdf.data_sources.neware_csv:NewareCSV"
-neware-nda   = "bdf.data_sources.neware_nda:NewareNDA"
-neware-nda-fast = "bdf.data_sources.neware_nda:NewareNDAFast"
-
 [project.optional-dependencies]
-fastnda = ["fastnda"]
-polars = ["polars", "fastnda"]
-hvplot = ["hvplot", "holoviews", "bokeh"]
+# CLI entry point (`bdf` command)
+cli = ["typer>=0.12", "rich>=13.7"]
+# pandas-based artifact IO/repair: bdf.load, bdf.save, bdf.clean, bdf.validate_df,
+# and bdf.plot/bdf.explore (which also need [plot])
+pandas = ["pandas>=2.0", "numpy>=1.24,<3.0"]
+# bdf.plot / bdf.explore (also requires [pandas] for the pandas-based DataFrame)
+plot = ["matplotlib>=3.8", "plotly", "hvplot", "holoviews", "bokeh"]
+# vendor file formats
+excel = ["fastexcel>=0.20.2"]
+mat = ["scipy>=1.15.3"]
+NDA = ["fastnda"]
 numpy2 = ["numpy>=2.0,<3.0"]
 yaml = [
     "pyyaml>=6.0.3",
@@ -88,13 +82,6 @@ docs = [
   "jupyter-cache>=1.0",
   "ipykernel>=6.29",
 ]
-excel = [
-    "fastexcel>=0.20.2",
-]
-mat = [
-    "scipy>=1.15.3",
-]
-
 
 [project.readme]
 file = "README.md"
