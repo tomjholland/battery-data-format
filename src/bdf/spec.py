@@ -65,6 +65,7 @@ _TEMPERATURE_DST_UNITS: frozenset[str] = frozenset({"degC", "°C", "K", "degF"})
 _SLASH_RE = re.compile(r"^\s*(.+?)\s*/\s*(.+)\s*$")
 _BDF_LIVE_URL = "https://w3id.org/battery-data-alliance/ontology/battery-data-format"
 _SCHEMA_UNIT_CODE = URIRef("https://schema.org/unitCode")
+_SCHEMA_UNIT_TEXT = URIRef("https://schema.org/unitText")
 _BDF_RELEASE_URL_TMPL = (
     "https://raw.githubusercontent.com/battery-data-alliance/"
     "battery-data-format-ontology/{version}/battery-data-format.ttl"
@@ -321,6 +322,12 @@ class Quantity(BaseModel):
     """One BDF physical quantity: unit, human label, and lookup metadata."""
 
     unit: str | None
+    unit_code: str = ""
+    """schema:unitCode verbatim (e.g. "A.h"); empty when the term carries none.
+    Unlike `unit` this is never normalized — published documents must emit the
+    annotation as the ontology states it."""
+    unit_text: str = ""
+    """schema:unitText verbatim (e.g. "ampere hour"); empty when absent."""
     label_template: str
     dtype: str = "float"
     mr_name: str
@@ -441,6 +448,14 @@ class Quantity(BaseModel):
         else:
             unit = None
 
+        # Verbatim annotations alongside the normalized unit: the EMMO
+        # measurement-unit restriction is deliberately not consulted, because
+        # the classes it names (AmpereHour, WattHour) do not exist at the
+        # pinned BattINFO version.
+        unit_code = unit_codes[0].strip() if unit_codes else ""
+        unit_texts = _english_literals(g, subject, _SCHEMA_UNIT_TEXT)
+        unit_text = unit_texts[0].strip() if unit_texts else ""
+
         if unit is not None:
             parsed = parse_label(pref_labels[0])
             base = parsed[0] if parsed else pref_labels[0]
@@ -505,6 +520,8 @@ class Quantity(BaseModel):
 
         return cls(
             unit=unit,
+            unit_code=unit_code,
+            unit_text=unit_text,
             label_template=label_template,
             mr_name=mr_name,
             notation=notation,
