@@ -16,6 +16,7 @@ to start if you want end-to-end workflows.
    ingest
    registry
    metadata
+   metadata_graph
    metadata_parser
    table_parser
    table_normalizers
