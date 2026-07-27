@@ -14,7 +14,7 @@ import pint
 import polars as pl
 from pydantic import BaseModel, field_validator, model_validator
 from rdflib import Graph, URIRef
-from rdflib.namespace import OWL, RDF, SKOS
+from rdflib.namespace import OWL, RDF, RDFS, SKOS
 
 from bdf._df_compat import coerce_dataframe
 
@@ -66,6 +66,9 @@ _SLASH_RE = re.compile(r"^\s*(.+?)\s*/\s*(.+)\s*$")
 _BDF_LIVE_URL = "https://w3id.org/battery-data-alliance/ontology/battery-data-format"
 _SCHEMA_UNIT_CODE = URIRef("https://schema.org/unitCode")
 _SCHEMA_UNIT_TEXT = URIRef("https://schema.org/unitText")
+# The discriminator between a BDF data column and everything else in the
+# graph. Undocumented upstream, but carried by every labelled BDF term.
+_SOSA_OBSERVABLE_PROPERTY = URIRef("http://www.w3.org/ns/sosa/ObservableProperty")
 _BDF_RELEASE_URL_TMPL = (
     "https://raw.githubusercontent.com/battery-data-alliance/"
     "battery-data-format-ontology/{version}/battery-data-format.ttl"
@@ -842,6 +845,13 @@ class ColumnOntology:
         """
         quantities: dict[str, Quantity] = {}
         for subject in g.subjects(RDF.type, OWL.Class):
+            # A BDF data column is exactly an owl:Class subclassing
+            # sosa:ObservableProperty. Every other class in the graph —
+            # notably everything reachable through the EMMO import closure,
+            # which carries thousands of labelled terms — is metadata
+            # vocabulary and is resolved through bdf.vocabulary instead.
+            if (subject, RDFS.subClassOf, _SOSA_OBSERVABLE_PROPERTY) not in g:
+                continue
             q = Quantity.from_graph_subject(g, subject, SKOS, OWL)
             if q is not None:
                 quantities[q.mr_name] = q

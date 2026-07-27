@@ -87,11 +87,15 @@ _MINIMAL_PRE_OBLIGATION_TTL = """
 @prefix : <https://w3id.org/battery-data-alliance/ontology/battery-data-format#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
 
 :test_time_second a owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Test Time / s"@en .
 
 :power_watt a owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Power / W"@en .
 """
 

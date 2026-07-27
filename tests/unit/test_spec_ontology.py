@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.resources
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -8,6 +9,8 @@ import pandas as pd
 import polars as pl
 import pytest
 from pydantic import ValidationError
+from rdflib import URIRef
+from rdflib.namespace import OWL, RDF, RDFS, SKOS
 
 from bdf import spec
 from bdf.spec import (
@@ -24,9 +27,12 @@ _MINI_TTL = """\
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
 @prefix schema: <https://schema.org/> .
 
 :test_time_second rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Test Time / ms"@en ;
     skos:altLabel "elapsed_ms"@en ;
     schema:unitCode "ms" .
@@ -37,25 +43,32 @@ _UCUM_TTL = """\
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
 @prefix schema: <https://schema.org/> .
 
 :ambient_temperature_celsius rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Ambient Temperature / Cel"@en ;
     schema:unitCode "Cel" .
 
 :charge_capacity_amp_hour rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Charge Capacity / A.h"@en ;
     schema:unitCode "A.h" .
 
 :energy_watt_hour rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Energy / W.h"@en ;
     schema:unitCode "W.h" .
 
 :internal_resistance_ohm rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Internal Resistance / Ohm"@en ;
     schema:unitCode "Ohm" .
 
 :step_label rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "Step Label"@en ;
     schema:description "A free-text string identifier for the step."@en .
 """
@@ -1026,21 +1039,26 @@ _REPLACED_BY_TTL = """\
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
 @prefix schema: <https://schema.org/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 
 :old_thing_ah rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     owl:deprecated "true"^^<http://www.w3.org/2001/XMLSchema#boolean> ;
     dcterms:isReplacedBy :new_thing_ah ;
     skos:prefLabel "Old Thing / Ah"@en ;
     schema:unitCode "A.h" .
 
 :orphan_ms rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     owl:deprecated "true"^^<http://www.w3.org/2001/XMLSchema#boolean> ;
     skos:prefLabel "Orphan / ms"@en ;
     schema:unitCode "ms" .
 
 :new_thing_ah rdf:type owl:Class ;
+    rdfs:subClassOf sosa:ObservableProperty ;
     skos:prefLabel "New Thing / Ah"@en ;
     schema:unitCode "A.h" .
 """
@@ -1067,3 +1085,83 @@ def test_every_deprecated_quantity_has_replacement() -> None:
         assert q.replaced_by, f"{mr} is deprecated but carries no dcterms:isReplacedBy"
         target = COLUMN_ONTOLOGY.get(q.replaced_by)
         assert target is not None and not target.deprecated, f"{mr} -> {q.replaced_by}"
+
+
+# --------- Column-versus-metadata filter ----------
+
+# `ColumnOntology.from_graph` admits a class as a BDF data column only when it
+# carries `rdfs:subClassOf sosa:ObservableProperty`. Every other `owl:Class` in
+# the graph — in particular everything reachable through the EMMO import
+# closure, which carries thousands of labelled terms — is metadata vocabulary
+# and resolves through `bdf.vocabulary` instead. Counts below are resolved from
+# the snapshot, never written as literals, so an ontology sync moves them
+# without a test edit.
+
+_BDF_NS = "https://w3id.org/battery-data-alliance/ontology/battery-data-format#"
+_SOSA_OBSERVABLE_PROPERTY = URIRef("http://www.w3.org/ns/sosa/ObservableProperty")
+
+
+def _bundled_graph():
+    data = importlib.resources.files("bdf.data").joinpath("bdf-ontology-snapshot.ttl").read_bytes()
+    return spec._graph_from_bytes(data, format="turtle")
+
+
+def test_every_labelled_column_class_survives_the_filter() -> None:
+    g = _bundled_graph()
+    expected = {
+        str(subject)
+        for subject in g.subjects(RDF.type, OWL.Class)
+        if (subject, RDFS.subClassOf, _SOSA_OBSERVABLE_PROPERTY) in g
+        and any(str(lit) for lit in g.objects(subject, SKOS.prefLabel))
+    }
+    assert expected, "snapshot should contain labelled column classes"
+    assert {q.iri for _, q in COLUMN_ONTOLOGY} == expected
+
+
+def test_surviving_terms_still_resolve_by_notation_and_synonym() -> None:
+    index = COLUMN_ONTOLOGY.base_synonym_index()
+    for name, q in COLUMN_ONTOLOGY:
+        assert COLUMN_ONTOLOGY[name] is q
+        if q.deprecated:
+            # Deprecated terms are deliberately absent from the synonym index.
+            continue
+        assert index.get(spec._slugify(q.effective_notation)) is not None, name
+        for synonym in q.synonyms:
+            assert index.get(spec._slugify(synonym)) is not None, (name, synonym)
+        assert COLUMN_ONTOLOGY.mr_name_from_label(q.formatted_label) is not None, name
+
+
+def test_labelled_classes_without_the_sosa_parent_are_excluded() -> None:
+    # Whether the snapshot currently carries such a class is an upstream
+    # detail; the contract is that one would be excluded if it did. Asserted
+    # by construction rather than by hoping the snapshot supplies an example.
+    ttl = (
+        _MINI_TTL
+        + """
+:imported_thing rdf:type owl:Class ;
+    skos:prefLabel "Imported Thing / V"@en ;
+    schema:unitCode "V" .
+"""
+    )
+    onto = ColumnOntology.from_graph(spec._graph_from_bytes(ttl.encode("utf-8"), format="turtle"))
+    assert "test_time_second" in onto
+    assert "imported_thing" not in onto
+
+
+def test_no_emmo_or_sosa_class_enters_the_column_ontology() -> None:
+    g = _bundled_graph()
+    for _, q in COLUMN_ONTOLOGY:
+        assert q.iri.startswith(_BDF_NS), q.iri
+
+    # The EMMO unit classes the snapshot names in its measurement-unit
+    # restrictions are labelled in the closure and are the classes most likely
+    # to leak in; none of them is a column.
+    units = {
+        str(obj)
+        for obj in g.objects(None, OWL.someValuesFrom)
+        if isinstance(obj, URIRef) and str(obj).startswith("https://w3id.org/emmo#")
+    }
+    assert units, "snapshot should reference EMMO unit classes"
+    iris = {q.iri for _, q in COLUMN_ONTOLOGY}
+    assert not (units & iris)
+    assert str(_SOSA_OBSERVABLE_PROPERTY) not in iris
