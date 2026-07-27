@@ -138,6 +138,7 @@ packages = [
 include = [
   "src/bdf/schemas/*.json",
   "src/bdf/data/bdf-ontology-snapshot.ttl",
+  "src/bdf/data/battinfo-context.json",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -145,6 +146,7 @@ include = [
   "src/bdf/**",
   "src/bdf/schemas/*.json",
   "src/bdf/data/bdf-ontology-snapshot.ttl",
+  "src/bdf/data/battinfo-context.json",
   "README.md",
   "pyproject.toml",
 ]
