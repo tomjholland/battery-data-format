@@ -87,8 +87,10 @@ test = [
   "nbclient>=0.9",
   "nbformat>=5.9",
   "ipykernel>=6.0",
-  # pybamm package not required for the table normalizer, only used in tests
-  "pybamm"
+  # pybamm package not required for the table normalizer, only used in tests.
+  # casadi (via pybammsolvers) has no cp314 manylinux-aarch64 wheel yet; drop
+  # the marker once casadi ships one.
+  "pybamm; python_version < '3.14' or sys_platform != 'linux' or platform_machine != 'aarch64'"
 ]
 lint = [
   # ruff and mypy are also run via pre-commit; pinned here to the same versions
