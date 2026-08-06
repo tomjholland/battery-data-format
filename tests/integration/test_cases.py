@@ -142,7 +142,7 @@ ALL_CASES: list[tuple[str, SampleCase]] = [
             deciding_stage="metadata",
             skip=12,
             sep=" ",
-            expected_metadata={"start_time": "30.11.2022 15:00:21"},
+            expected_metadata={"started_at": "30.11.2022 15:00:21"},
             expected_columns={
                 "test_time_second": ColExpect("~Time[h]", 3600.0),
                 "record_index": ColExpect("DataSet", 1.0),

@@ -10,7 +10,7 @@ adjacent JSON sidecar (:class:`JsonSidecarParser`). To keep that orthogonality a
 the import level too, **this module MUST NOT import from** :mod:`bdf.readers`; it
 reads the bytes it needs through :func:`read_head` from :mod:`bdf.file_utils`.
 
-:class:`MetadataSchema` is the single source of truth for BDF metadata field names
+:class:`MetadataRules` is the single source of truth for BDF metadata field names
 (symmetric with :class:`~bdf.table_normalizers.TableNormalizer`'s mr_name fields). Frozen +
 scalar/tuple values ⇒ every parser instance is hashable, so ``PLUGINS.metadata_parsers``
 can be a ``frozenset``.
@@ -30,7 +30,7 @@ from .file_utils import read_head
 T = TypeVar("T")
 
 
-class MetadataSchema(BaseModel, Generic[T]):
+class MetadataRules(BaseModel, Generic[T]):
     """Generic frozen model declaring one field per supported BDF metadata field.
 
     ``T`` is the per-parser extraction-rule type (``str`` regex patterns for
@@ -42,7 +42,10 @@ class MetadataSchema(BaseModel, Generic[T]):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    start_time: T | None = None
+    name: T | None = None
+    instrument_name: T | None = None
+    started_at: T | None = None
+    ended_at: T | None = None
 
     def __iter__(self) -> Iterator[tuple[str, T]]:  # type: ignore[override]
         """Yield ``(field_name, rule)`` for each set (non-None) field in declaration order.
@@ -127,8 +130,8 @@ class TxtPreambleParser(MetadataParser):
         ),
     )
     encoding: str = Field(default="utf-8", description="Codec used to decode head bytes before regex matching.")
-    regex_patterns: MetadataSchema[re.Pattern[str]] = Field(
-        default_factory=lambda: MetadataSchema[re.Pattern[str]](),
+    regex_patterns: MetadataRules[re.Pattern[str]] = Field(
+        default_factory=lambda: MetadataRules[re.Pattern[str]](),
         description="Per-field compiled regex patterns; each pattern's group(1) is the extracted value.",
     )
 
@@ -185,8 +188,8 @@ class JsonSidecarParser(MetadataParser):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["json_sidecar"] = "json_sidecar"  # type: ignore[assignment]
-    key_synonyms: MetadataSchema[tuple[str, ...]] = Field(
-        default_factory=lambda: MetadataSchema[tuple[str, ...]](),
+    key_synonyms: MetadataRules[tuple[str, ...]] = Field(
+        default_factory=lambda: MetadataRules[tuple[str, ...]](),
         description="Per-field ordered tuples of candidate JSON keys.",
     )
 

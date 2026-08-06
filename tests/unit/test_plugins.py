@@ -103,6 +103,11 @@ class TestPluginDict:
         """Every built-in Plugin survives model_dump_json → model_validate_json."""
         assert Plugin.model_validate_json(ds.model_dump_json()) == ds
 
+    def test_plugin_metadata_parsers_share_a_frozenset(self) -> None:
+        """A frozenset over every registered plugin's metadata parser contains each one."""
+        parsers = frozenset(plugin.metadata_parser for plugin in PLUGINS.values())
+        assert all(plugin.metadata_parser in parsers for plugin in PLUGINS.values())
+
     def test_plugin_defaults_metadata_to_inert_parser(self) -> None:
         """A Plugin built from a table_parser alone gets an inert base MetadataParser."""
         p = Plugin(table_parser=DelimTxtParser(normalizer=NORMALIZERS["arbin"]))

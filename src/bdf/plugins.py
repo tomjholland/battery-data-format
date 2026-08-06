@@ -31,7 +31,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from .file_utils import is_url, read_head, resolve_source, strip_compression_suffix
-from .metadata_parsers import JsonSidecarParser, MetadataParser, MetadataSchema, TxtPreambleParser
+from .metadata_parsers import JsonSidecarParser, MetadataParser, MetadataRules, TxtPreambleParser
 from .table_normalizers import BDF_NORMALIZER, NDA_NORMALIZER, NORMALIZERS, TableNormalizer
 from .table_parsers import (
     DelimTxtParser,
@@ -173,7 +173,7 @@ BASYTEC_TXT = Plugin(
             "basytec battery test system",
         ),
         encoding="latin-1",
-        regex_patterns=MetadataSchema[re.Pattern[str]](start_time=re.compile(r"~Start of Test:\s*(.+)")),
+        regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"~Start of Test:\s*(.+)")),
     ),
 )
 
@@ -185,7 +185,7 @@ BIOLOGIC_MPT = Plugin(
     ),
     metadata_parser=TxtPreambleParser(
         magic=("bt-lab ascii file", "ec-lab ascii file"),
-        regex_patterns=MetadataSchema[re.Pattern[str]](start_time=re.compile(r"Acquisition started on\s*:\s*(.+)")),
+        regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"Acquisition started on\s*:\s*(.+)")),
     ),
 )
 
@@ -207,7 +207,7 @@ MACCOR_CSV = Plugin(
     table_parser=DelimTxtParser(normalizer=NORMALIZERS["maccor"]),
     metadata_parser=TxtPreambleParser(
         magic=("today's date ,", "date of test:,"),
-        regex_patterns=MetadataSchema[re.Pattern[str]](start_time=re.compile(r"Date of Test:,(.+)")),
+        regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"Date of Test:,(.+)")),
     ),
 )
 
