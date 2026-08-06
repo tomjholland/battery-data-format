@@ -9,11 +9,55 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal, assert_series_equal
 
-from bdf import BDFValidationError, io
+from bdf import BDFValidationError, ReadMetadata, io
 from bdf.io import read, scan
+from bdf.metadata_parsers import MetadataParser
 from bdf.plugins import Plugin
 from bdf.table_normalizers import TableNormalizer
 from bdf.table_parsers import DelimTxtParser
+
+
+def _plugin_id(meta: dict | ReadMetadata) -> str | None:
+    """Return the resolved plugin id from a read()/scan() metadata result.
+
+    Args:
+        meta: The metadata result read() or scan() returned.
+
+    Returns:
+        A dict's "source" key, or a ReadMetadata's bdf.source.
+    """
+    if isinstance(meta, dict):
+        return meta["source"]
+    return meta.bdf.source
+
+
+def _time_reconciliation(meta: dict | ReadMetadata) -> list[dict] | None:
+    """Return the time-reconciliation repair records from a read()/scan() metadata result.
+
+    Args:
+        meta: The metadata result read() or scan() returned.
+
+    Returns:
+        The repair records, or None if none were recorded.
+    """
+    if isinstance(meta, dict):
+        return meta.get("time_reconciliation")
+    return meta.bdf.time_reconciliation
+
+
+def _instrument_name(meta: dict | ReadMetadata) -> str | None:
+    """Return the staged instrument name from a read()/scan() metadata result.
+
+    Args:
+        meta: The metadata result read() or scan() returned.
+
+    Returns:
+        A dict's "instrument_name" key, or a ReadMetadata's
+        test_record.test.instrument_name.
+    """
+    if isinstance(meta, dict):
+        return meta.get("instrument_name")
+    return meta.test_record.test.instrument_name
 
 
 def test_detect_format_known_and_unknown(tmp_path: Path):
@@ -268,7 +312,7 @@ def test_save_default_artifact_read_validate_roundtrip(tmp_path: Path, fname: st
     io.save(df, path)
     loaded, meta = io.read(path)
 
-    assert meta["source"] in {"bdf_csv", "bdf_parquet"}
+    assert _plugin_id(meta) in {"bdf_csv", "bdf_parquet"}
     assert isinstance(loaded, pl.DataFrame)
     assert loaded.columns == ["Test Time / s", "Voltage / V", "Current / A"]
 
@@ -297,16 +341,16 @@ def read_mocks(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     Returns:
         Namespace with ``plugin`` (a real Plugin whose seams are mocked),
-        ``table_read``, ``meta_parse``, and ``detect`` mocks.
+        ``table_read``, and ``detect`` mocks. ``plugin`` keeps its real, inert
+        default ``MetadataParser`` so the staged metadata type tracks the parser
+        contract instead of a mock.
     """
     plugin = Plugin(table_parser=DelimTxtParser(normalizer=TableNormalizer()))
     table_read = MagicMock(return_value=pl.DataFrame({"x": [1]}).lazy())
-    meta_parse = MagicMock(return_value={})
     detect = MagicMock(return_value=("detected_id", plugin))
     monkeypatch.setattr("bdf.table_parsers.TableParser.read", table_read)
-    monkeypatch.setattr("bdf.metadata_parsers.MetadataParser.parse", meta_parse)
     monkeypatch.setattr("bdf.io.detect", detect)
-    return SimpleNamespace(plugin=plugin, table_read=table_read, meta_parse=meta_parse, detect=detect)
+    return SimpleNamespace(plugin=plugin, table_read=table_read, detect=detect)
 
 
 def test_read_plugin_none_delegates_to_detect(read_mocks: SimpleNamespace, tmp_path: Path) -> None:
@@ -314,7 +358,7 @@ def test_read_plugin_none_delegates_to_detect(read_mocks: SimpleNamespace, tmp_p
     p = tmp_path / "f.csv"
     _, meta = read(p)
     read_mocks.detect.assert_called_once_with(p)
-    assert meta["source"] == "detected_id"
+    assert _plugin_id(meta) == "detected_id"
 
 
 def test_read_plugin_str_uses_registry_not_detect(
@@ -324,7 +368,7 @@ def test_read_plugin_str_uses_registry_not_detect(
     monkeypatch.setattr("bdf.io.PLUGINS", {"vend": read_mocks.plugin})
     p = tmp_path / "f.csv"
     _, meta = read(p, plugin="vend")
-    assert meta["source"] == "vend"
+    assert _plugin_id(meta) == "vend"
     read_mocks.detect.assert_not_called()
 
 
@@ -332,7 +376,7 @@ def test_read_plugin_instance_is_custom_and_skips_detect(read_mocks: SimpleNames
     """read(plugin=<Plugin>) uses it directly, sets source='custom', never calls detect()."""
     p = tmp_path / "f.csv"
     _, meta = read(p, plugin=read_mocks.plugin)
-    assert meta["source"] == "custom"
+    assert _plugin_id(meta) == "custom"
     read_mocks.detect.assert_not_called()
 
 
@@ -385,13 +429,24 @@ def test_scan_forwards_all_read_kwargs_to_table_parser(read_mocks: SimpleNamespa
     )
 
 
-def test_read_merges_metadata_parser_output(read_mocks: SimpleNamespace, tmp_path: Path) -> None:
-    """read() calls metadata_parser.parse(path) and merges its keys alongside source."""
-    read_mocks.meta_parse.return_value = {"start_time": "2024-01-15", "channel": "3"}
+def test_read_merges_metadata_parser_output(
+    read_mocks: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """read() calls metadata_parser.parse() and merges the staged instrument_name."""
     p = tmp_path / "f.csv"
+    raw_staged = MetadataParser().parse(p)
+    staged: object
+    if isinstance(raw_staged, dict):
+        staged = {**raw_staged, "instrument_name": "Instrument X"}
+    else:
+        staged = raw_staged.model_copy(update={"instrument_name": "Instrument X"})
+    meta_parse = MagicMock(return_value=staged)
+    monkeypatch.setattr("bdf.metadata_parsers.MetadataParser.parse", meta_parse)
     _, meta = read(p, plugin=read_mocks.plugin)
-    read_mocks.meta_parse.assert_called_once_with(p)
-    assert meta == {"source": "custom", "start_time": "2024-01-15", "channel": "3"}
+    meta_parse.assert_called_once()
+    assert meta_parse.call_args.args[0] == p
+    assert _plugin_id(meta) == "custom"
+    assert _instrument_name(meta) == "Instrument X"
 
 
 def test_read_returns_table_parser_frame_unchanged(read_mocks: SimpleNamespace, tmp_path: Path) -> None:
@@ -625,7 +680,9 @@ def test_read_reconcile_time_true_repairs_and_records(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="rescaled to seconds as requested"):
         df, meta = read(path, reconcile_time=True)
     assert df["Test Time / s"].to_list()[:3] == [0.0, 10.0, 20.0]
-    (record,) = meta["time_reconciliation"]
+    records = _time_reconciliation(meta)
+    assert records is not None
+    (record,) = records
     assert record["column"] == "Test Time / s"
     assert record["actual_unit"] == "milliseconds"
     assert record["action"] == "divided by 1000"
@@ -637,7 +694,7 @@ def test_scan_reconcile_time_true_repairs_lazy(tmp_path: Path) -> None:
         lf, meta = scan(path, reconcile_time=True)
     assert isinstance(lf, pl.LazyFrame)
     assert lf.collect()["Test Time / s"].to_list()[1] == 10.0
-    assert meta["time_reconciliation"]
+    assert _time_reconciliation(meta)
 
 
 def test_read_consistent_clocks_add_no_metadata(tmp_path: Path) -> None:
@@ -654,7 +711,7 @@ def test_read_consistent_clocks_add_no_metadata(tmp_path: Path) -> None:
     df.write_csv(path)
     out, meta = read(path)
     assert out["Test Time / s"].to_list()[1] == 10.0
-    assert "time_reconciliation" not in meta
+    assert _time_reconciliation(meta) is None
 
 
 def test_read_unexplained_ratio_stays_loud_even_with_reconcile_time(tmp_path: Path) -> None:

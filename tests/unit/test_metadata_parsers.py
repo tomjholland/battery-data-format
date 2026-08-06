@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 import bdf.metadata_parsers
 from bdf.battinfo_records import TestSection
@@ -18,7 +18,21 @@ from bdf.metadata_parsers import (
     TxtPreambleParser,
 )
 
-START_TIME_RX = re.compile(r"~Start of Test:\s*(.+)")
+INSTRUMENT_RX = re.compile(r"~Instrument:\s*(.+)")
+
+
+def _parsed_fields(result: dict[str, str] | BaseModel) -> dict[str, str]:
+    """Return a parse() result's set fields as a plain dict.
+
+    Args:
+        result: A parse() return value: either a dict or a pydantic model.
+
+    Returns:
+        Mapping of field name to value for every field the parser set.
+    """
+    if isinstance(result, BaseModel):
+        return result.model_dump(exclude_unset=True)
+    return dict(result)
 
 
 class TestMetadataRules:
@@ -94,7 +108,7 @@ class TestMetadataParserBase:
     def test_base_parse_returns_empty(self, tmp_path: Path) -> None:
         p = tmp_path / "f.txt"
         p.write_text("anything")
-        assert MetadataParser().parse(p) == {}
+        assert _parsed_fields(MetadataParser().parse(p)) == {}
 
     def test_base_is_hashable(self) -> None:
         assert MetadataParser() in frozenset({MetadataParser()})
@@ -123,44 +137,44 @@ class TestTxtPreambleParser:
 
     def test_txt_parse_extracts_field(self, tmp_path: Path) -> None:
         p = tmp_path / "f.txt"
-        p.write_text("header\n~Start of Test: 19.06.2023 17:56:53\nmore\n")
-        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](started_at=START_TIME_RX))
-        assert parser.parse(p) == {"started_at": "19.06.2023 17:56:53"}
+        p.write_text("header\n~Instrument: Maccor 4000\nmore\n")
+        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+        assert _parsed_fields(parser.parse(p)) == {"instrument_name": "Maccor 4000"}
 
     def test_txt_parse_honours_encoding(self, tmp_path: Path) -> None:
         """parse() decodes the head with the configured encoding (latin-1)."""
         p = tmp_path / "latin1.txt"
-        p.write_bytes("~Start of Test: caf\xe9\n".encode("latin-1"))
+        p.write_bytes("~Instrument: caf\xe9\n".encode("latin-1"))
         parser = TxtPreambleParser(
             encoding="latin-1",
-            regex_patterns=MetadataRules[re.Pattern[str]](started_at=START_TIME_RX),
+            regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX),
         )
-        assert parser.parse(p) == {"started_at": "caf\xe9"}
+        assert _parsed_fields(parser.parse(p)) == {"instrument_name": "caf\xe9"}
 
     def test_txt_parse_returns_only_matched_fields(self, tmp_path: Path) -> None:
         p = tmp_path / "f.txt"
         p.write_text("no relevant lines here\n")
-        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](started_at=START_TIME_RX))
-        assert parser.parse(p) == {}
+        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+        assert _parsed_fields(parser.parse(p)) == {}
 
     def test_txt_parse_strips_captured_value(self, tmp_path: Path) -> None:
         """match_one strips surrounding whitespace from group(1)."""
         p = tmp_path / "f.txt"
-        p.write_text("~Start of Test:   19.06.2023   \n")
-        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](started_at=START_TIME_RX))
-        assert parser.parse(p) == {"started_at": "19.06.2023"}
+        p.write_text("~Instrument:   Maccor 4000   \n")
+        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+        assert _parsed_fields(parser.parse(p)) == {"instrument_name": "Maccor 4000"}
 
     def test_txt_parse_first_matching_line_wins(self, tmp_path: Path) -> None:
         """match_one returns the first matching line, ignoring later matches."""
         p = tmp_path / "f.txt"
-        p.write_text("~Start of Test: first\n~Start of Test: second\n")
-        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](started_at=START_TIME_RX))
-        assert parser.parse(p) == {"started_at": "first"}
+        p.write_text("~Instrument: first\n~Instrument: second\n")
+        parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+        assert _parsed_fields(parser.parse(p)) == {"instrument_name": "first"}
 
     def test_txt_is_hashable(self) -> None:
         parser = TxtPreambleParser(
             magic=("x",),
-            regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"a(.+)")),
+            regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=re.compile(r"a(.+)")),
         )
         assert parser in frozenset({parser})
 
@@ -184,41 +198,45 @@ class TestJsonSidecarParser:
     def test_json_parse_resolves_synonyms(self, tmp_path: Path) -> None:
         data = tmp_path / "cell.csv"
         data.write_text("a,b\n1,2\n")
-        (tmp_path / "cell.json").write_text(json.dumps({"StartTime": "2024-01-01"}))
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at", "StartTime", "test_start")))
-        assert parser.parse(data) == {"started_at": "2024-01-01"}
+        (tmp_path / "cell.json").write_text(json.dumps({"InstrumentName": "Maccor 4000"}))
+        parser = JsonSidecarParser(
+            key_synonyms=MetadataRules(instrument_name=("instrument_name", "InstrumentName", "device"))
+        )
+        assert _parsed_fields(parser.parse(data)) == {"instrument_name": "Maccor 4000"}
 
     def test_json_parse_returns_only_matched_fields(self, tmp_path: Path) -> None:
         data = tmp_path / "cell.csv"
         data.write_text("a,b\n1,2\n")
         (tmp_path / "cell.json").write_text(json.dumps({"other": "x"}))
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at",)))
-        assert parser.parse(data) == {}
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name",)))
+        assert _parsed_fields(parser.parse(data)) == {}
 
     def test_json_parse_no_sidecar_returns_empty(self, tmp_path: Path) -> None:
         data = tmp_path / "cell.csv"
         data.write_text("a,b\n1,2\n")
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at",)))
-        assert parser.parse(data) == {}
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name",)))
+        assert _parsed_fields(parser.parse(data)) == {}
 
     def test_json_parse_first_synonym_in_order_wins(self, tmp_path: Path) -> None:
         """match_one picks the first synonym present in tuple order, not file order."""
         data = tmp_path / "cell.csv"
         data.write_text("a,b\n1,2\n")
-        (tmp_path / "cell.json").write_text(json.dumps({"StartTime": "tuple_second", "started_at": "tuple_first"}))
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at", "StartTime")))
-        assert parser.parse(data) == {"started_at": "tuple_first"}
+        (tmp_path / "cell.json").write_text(
+            json.dumps({"InstrumentName": "tuple_second", "instrument_name": "tuple_first"})
+        )
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name", "InstrumentName")))
+        assert _parsed_fields(parser.parse(data)) == {"instrument_name": "tuple_first"}
 
     def test_json_parse_coerces_non_string_value(self, tmp_path: Path) -> None:
         """match_one coerces a non-string JSON value with str()."""
         data = tmp_path / "cell.csv"
         data.write_text("a,b\n1,2\n")
-        (tmp_path / "cell.json").write_text(json.dumps({"started_at": 1700000000}))
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at",)))
-        assert parser.parse(data) == {"started_at": "1700000000"}
+        (tmp_path / "cell.json").write_text(json.dumps({"instrument_name": 4000}))
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name",)))
+        assert _parsed_fields(parser.parse(data)) == {"instrument_name": "4000"}
 
     def test_json_is_hashable(self) -> None:
-        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at",)))
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name",)))
         assert parser in frozenset({parser})
 
 
