@@ -11,6 +11,16 @@ from typing import Any, Literal, Optional
 import pandas as pd
 
 # light imports that never cause cycles
+from .battinfo_records import (  # hand-written BattINFO record models
+    BdfReadInfo,
+    DatasetRecord,
+    DatasetSection,
+    Provenance,
+    ReadMetadata,
+    TestRecord,
+    TestSection,
+    VariableMeasured,
+)
 from .file_utils import ensure_dir as _ensure_dir, is_url as _is_url
 from .io import read, save, scan  # spec-driven reader/serializer (the public read()/scan())
 from .plugins import detect  # spec-driven detection -> (plugin_id, Plugin)
@@ -27,6 +37,15 @@ __all__ = [
     "validate",
     "validate_df",
     "detect",
+    # BattINFO record models
+    "TestSection",
+    "Provenance",
+    "TestRecord",
+    "VariableMeasured",
+    "DatasetSection",
+    "DatasetRecord",
+    "BdfReadInfo",
+    "ReadMetadata",
     # datasets helpers
     "datasets",
     "load_registry",

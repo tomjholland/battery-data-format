@@ -4,11 +4,8 @@ Cover partial fill, assignment type-checking, unknown-field passthrough,
 nested assignment on a fresh :class:`ReadMetadata`, and lossless ``to_dict()``
 round-tripping of a curated record's non-null key set.
 
-Imports of ``bdf.battinfo_records`` are deferred to inside each test body: a
-module-level import of a missing module would fail collection outright,
-whereas the deferred import turns it into an ordinary test failure that
-``xfail(strict=True)`` absorbs, keeping the suite green until the module
-exists.
+Imports of ``bdf.battinfo_records`` are made inside each test body rather
+than at module level.
 """
 
 from __future__ import annotations
@@ -16,10 +13,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-XFAIL_REASON = "bdf.battinfo_records is not implemented yet"
 
-
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_partial_fill_validates_and_leaves_other_leaf_fields_none() -> None:
     """A record stating only one field validates; every other declared leaf field is None."""
     from bdf.battinfo_records import TestSection
@@ -32,7 +26,6 @@ def test_partial_fill_validates_and_leaves_other_leaf_fields_none() -> None:
     assert section.ended_at is None
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_partial_fill_on_a_nested_record_leaves_sibling_sections_empty() -> None:
     """Partial fill nested inside a TestRecord still auto-constructs the unset sibling section."""
     from bdf.battinfo_records import TestRecord, TestSection
@@ -45,7 +38,6 @@ def test_partial_fill_on_a_nested_record_leaves_sibling_sections_empty() -> None
     assert record.provenance.source_type is None
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_assignment_is_type_checked() -> None:
     """Assigning a non-integer to started_at raises a validation error, not a silent coercion."""
     from bdf.battinfo_records import TestSection
@@ -56,7 +48,6 @@ def test_assignment_is_type_checked() -> None:
         section.started_at = "not-a-timestamp"  # type: ignore[assignment]
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_unknown_fields_survive_validation_and_reappear_on_serialisation() -> None:
     """extra='allow' carries a field the model does not declare through unharmed."""
     from bdf.battinfo_records import TestSection
@@ -67,7 +58,6 @@ def test_unknown_fields_survive_validation_and_reappear_on_serialisation() -> No
     assert section.to_dict()["totally_unknown_field"] == "kept"
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_nested_assignment_on_a_fresh_read_metadata_reaches_the_leaf() -> None:
     """meta.test_record.test.started_at = ... works with no None guard on a fresh ReadMetadata()."""
     from bdf.battinfo_records import ReadMetadata
@@ -79,7 +69,6 @@ def test_nested_assignment_on_a_fresh_read_metadata_reaches_the_leaf() -> None:
     assert meta.to_dict() == {"test_record": {"test": {"started_at": 1700000000}}}
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_to_dict_round_trip_preserves_a_curated_test_records_non_null_key_set() -> None:
     """A stated null is unset (omitted), unknown fields pass through, schema_version is never injected."""
     from bdf.battinfo_records import TestRecord
@@ -109,7 +98,6 @@ def test_to_dict_round_trip_preserves_a_curated_test_records_non_null_key_set() 
     assert "schema_version" not in record.to_dict()
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_extra_empty_dict_survives_to_dict_unpruned() -> None:
     """An undeclared field holding {} survives to_dict(), unlike a declared section that dumps to {}."""
     from bdf.battinfo_records import BdfReadInfo, ReadMetadata
@@ -134,7 +122,6 @@ def test_extra_empty_dict_survives_to_dict_unpruned() -> None:
     assert "dataset_record" not in dumped
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_to_dict_round_trip_preserves_a_curated_dataset_records_non_null_key_set() -> None:
     """The same round-trip guarantee holds for the dataset side, including a stated variable_measured list."""
     from bdf.battinfo_records import DatasetRecord

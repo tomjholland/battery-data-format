@@ -7,11 +7,8 @@ upstream rename that would silently break the handoff instead fails this test
 with a one-line fix (rename the field on the hand-written model, refresh the
 fixture per ``tests/fixtures/battinfo/README.md``).
 
-Imports of ``bdf.battinfo_records`` are deferred to inside each test body: a
-module-level import of a missing module would fail collection outright,
-whereas the deferred import turns it into an ordinary test failure that
-``xfail(strict=True)`` absorbs, keeping the suite green until the module
-exists.
+Imports of ``bdf.battinfo_records`` are made inside each test body rather
+than at module level.
 """
 
 from __future__ import annotations
@@ -22,10 +19,7 @@ import typing
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "battinfo"
-XFAIL_REASON = "bdf.battinfo_records is not implemented yet"
 
 
 def _load_schema(name: str) -> dict[str, Any]:
@@ -143,7 +137,6 @@ def _assert_fields_resolve(
     return walked
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_provenance_fields_resolve_upstream() -> None:
     """Provenance fields (source_file, source_type, ...) exist in the pinned
     shared provenance module (``modules/common/provenance.schema.json``),
@@ -159,7 +152,6 @@ def test_provenance_fields_resolve_upstream() -> None:
     assert expected <= walked
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_test_record_fields_resolve_upstream() -> None:
     """Every field path TestRecord declares (schema_version, test.*,
     provenance and its nested contents) is a valid location in the pinned
@@ -191,7 +183,6 @@ def test_test_record_fields_resolve_upstream() -> None:
     assert expected <= walked
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_dataset_record_fields_resolve_upstream() -> None:
     """Every field path DatasetRecord declares (schema_version, dataset.*
     including variable_measured's item shape, provenance and its nested
@@ -224,7 +215,6 @@ def test_dataset_record_fields_resolve_upstream() -> None:
     assert expected <= walked
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_no_runtime_battinfo_import() -> None:
     """BDF must never import battinfo at runtime, keeping the
     battinfo[processing] -> batterydf dependency direction acyclic: the
@@ -247,7 +237,6 @@ def test_no_runtime_battinfo_import() -> None:
     assert "battinfo" not in json.dumps(dumped)
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_read_metadata_exposes_no_importer_adapter() -> None:
     """The serialised ``ReadMetadata`` is the handoff contract itself: the
     only public method BDF adds is ``to_dict()`` — no ``to_battinfo`` or
