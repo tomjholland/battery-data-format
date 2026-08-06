@@ -1,0 +1,59 @@
+{
+  "$id": "https://w3id.org/battinfo/schema/modules/common/provenance.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Minimal provenance object for shared BattINFO/BDF descriptor files.",
+  "properties": {
+    "battinfo_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.-]+)?$",
+      "type": "string"
+    },
+    "citation": {
+      "description": "Resolvable citation target to use for attribution, typically a DOI URL.",
+      "format": "uri",
+      "type": "string"
+    },
+    "citation_doi": {
+      "description": "Deprecated compatibility field. Prefer provenance.citation with a DOI resolver URL.",
+      "pattern": "^10\\.\\d{4,9}/[-._;()/:A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "comment": {
+      "type": "string"
+    },
+    "retrieved_at": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "source_file": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_name": {
+      "type": "string"
+    },
+    "source_type": {
+      "type": "string"
+    },
+    "source_url": {
+      "anyOf": [
+        {
+          "format": "uri",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workflow_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_file",
+    "retrieved_at"
+  ],
+  "title": "Provenance",
+  "type": "object"
+}
