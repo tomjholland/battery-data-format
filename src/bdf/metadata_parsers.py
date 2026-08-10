@@ -14,6 +14,11 @@ reads the bytes it needs through :func:`read_head` from :mod:`bdf.file_utils`.
 (symmetric with :class:`~bdf.table_normalizers.TableNormalizer`'s mr_name fields). Frozen +
 scalar/tuple values ⇒ every parser instance is hashable, so ``PLUGINS.metadata_parsers``
 can be a ``frozenset``.
+
+``started_at`` and ``ended_at`` store integer epoch seconds. :class:`TxtPreambleParser`
+coerces the text its regexes matched with :func:`bdf._datetime_fmt.to_epoch_seconds`;
+:class:`JsonSidecarParser` passes a real JSON integer through unchanged for those two
+fields instead of stringifying it.
 """
 
 from __future__ import annotations
@@ -23,11 +28,15 @@ import re
 from pathlib import Path
 from typing import Callable, Generic, Iterator, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ._datetime_fmt import to_epoch_seconds
 from .file_utils import read_head
 
 T = TypeVar("T")
+
+# Metadata fields that store integer epoch seconds rather than free text.
+_DATETIME_FIELDS = ("started_at", "ended_at")
 
 
 class MetadataRules(BaseModel, Generic[T]):
@@ -76,6 +85,62 @@ class MetadataRules(BaseModel, Generic[T]):
         return result
 
 
+def _require_datetime_formats(rules: MetadataRules, datetime_formats: tuple[str, ...]) -> None:
+    """Reject a parser that declares a datetime rule but no format to read it with.
+
+    Coercion failure is silent by design at parse time: an unparseable preamble
+    line must not fail an otherwise good read. That leaves construction as the
+    only place a plugin author who forgot the formats can be told, rather than
+    the field silently staying unset forever.
+
+    Args:
+        rules: The parser's per-field extraction rules.
+        datetime_formats: The parser's declared candidate datetime formats.
+
+    Raises:
+        ValueError: If a datetime field has a rule but no formats are declared.
+    """
+    if datetime_formats:
+        return
+    declared = tuple(field_name for field_name, _ in rules if field_name in _DATETIME_FIELDS)
+    if declared:
+        raise ValueError(
+            f"datetime_formats must be set when a rule is declared for {', '.join(declared)}; "
+            "without it the extracted text can never be coerced to epoch seconds"
+        )
+
+
+def _coerce_preamble_datetimes(
+    fields: dict[str, str], datetime_formats: tuple[str, ...], tz: str
+) -> dict[str, str | int]:
+    """Coerce matched text for the datetime fields of ``fields`` to integer epoch seconds.
+
+    A field whose text no candidate format parses is dropped rather than kept as
+    unparsed text, matching the "unset, not an error" policy of the rest of
+    metadata extraction.
+
+    Args:
+        fields: Field name to matched text, as returned by ``MetadataRules.extract``.
+        datetime_formats: Ordered candidate strptime formats.
+        tz: IANA timezone applied to naive formats.
+
+    Returns:
+        A copy of ``fields`` with each datetime field replaced by its epoch
+        seconds, or removed when no format parsed its text.
+    """
+    result: dict[str, str | int] = dict(fields)
+    for field_name in _DATETIME_FIELDS:
+        text = fields.get(field_name)
+        if text is None:
+            continue
+        epoch, _ = to_epoch_seconds(text, datetime_formats, tz)
+        if epoch is None:
+            del result[field_name]
+        else:
+            result[field_name] = epoch
+    return result
+
+
 class MetadataParser(BaseModel):
     """Base / null metadata parser: never matches, extracts nothing.
 
@@ -98,11 +163,13 @@ class MetadataParser(BaseModel):
         """
         return False
 
-    def parse(self, path: str | Path) -> dict[str, str]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
         """Extract BDF metadata fields from ``path``. Base: nothing.
 
         Args:
             path: Local file path or URL to parse.
+            tz: IANA timezone applied to naive datetime formats. Unused by the
+                base class, which extracts nothing.
 
         Returns:
             Empty dict for base class (override in subclasses).
@@ -116,7 +183,8 @@ class TxtPreambleParser(MetadataParser):
     ``magic`` tokens identify the format; ``encoding`` decodes the head bytes;
     ``regex_patterns`` holds one regex per set field whose ``group(1)`` is the
     extracted value. :meth:`parse` applies each regex over the decoded head
-    lines (no separator / skip-rows sniffing).
+    lines (no separator / skip-rows sniffing), then coerces ``started_at`` and
+    ``ended_at`` text to integer epoch seconds with ``datetime_formats``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -134,6 +202,24 @@ class TxtPreambleParser(MetadataParser):
         default_factory=lambda: MetadataRules[re.Pattern[str]](),
         description="Per-field compiled regex patterns; each pattern's group(1) is the extracted value.",
     )
+    datetime_formats: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Ordered candidate strptime formats tried, in order, to coerce matched "
+            "started_at/ended_at text to integer epoch seconds. Required when a rule "
+            "is declared for either field."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_datetime_formats(self) -> "TxtPreambleParser":
+        """Reject a started_at/ended_at rule declared without datetime_formats.
+
+        Returns:
+            The validated parser.
+        """
+        _require_datetime_formats(self.regex_patterns, self.datetime_formats)
+        return self
 
     def matches(self, path: str | Path) -> bool:
         """Return True when any magic token is found in the file's head bytes.
@@ -156,14 +242,16 @@ class TxtPreambleParser(MetadataParser):
                 return True
         return False
 
-    def parse(self, path: str | Path) -> dict[str, str]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
         """Decode the head with ``encoding`` and apply each regex; first match per field.
 
         Args:
             path: Local file path or URL to parse.
+            tz: IANA timezone applied to naive matched started_at/ended_at text.
 
         Returns:
-            Dictionary mapping field names to extracted values (first match per regex).
+            Dictionary mapping field names to extracted values (first match per
+            regex), with started_at/ended_at coerced to integer epoch seconds.
         """
         head = read_head(path)
         lines = head.decode(self.encoding, errors="replace").splitlines()
@@ -175,7 +263,8 @@ class TxtPreambleParser(MetadataParser):
                     return m.group(1).strip()
             return None
 
-        return self.regex_patterns.extract(match_one)
+        matched = self.regex_patterns.extract(match_one)
+        return _coerce_preamble_datetimes(matched, self.datetime_formats, tz)
 
 
 class JsonSidecarParser(MetadataParser):
@@ -183,6 +272,8 @@ class JsonSidecarParser(MetadataParser):
 
     ``key_synonyms`` holds an ordered tuple of candidate JSON keys per set field;
     :meth:`parse` returns the value of the first synonym key present in the JSON.
+    A real JSON integer matched for ``started_at``/``ended_at`` passes through
+    unchanged, since it is already epoch seconds; every other value is stringified.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -215,14 +306,17 @@ class JsonSidecarParser(MetadataParser):
         """
         return self._sidecar(path).exists()
 
-    def parse(self, path: str | Path) -> dict[str, str]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
         """Load the sidecar JSON and resolve each set field's synonym keys (first match).
 
         Args:
             path: Local file path to the data file.
+            tz: Unused; the sidecar has no text datetime formats to localise.
 
         Returns:
-            Dictionary mapping field names to extracted values from the sidecar JSON.
+            Dictionary mapping field names to extracted values from the sidecar
+            JSON: a real integer for a matched started_at/ended_at key, else the
+            value stringified.
         """
         sidecar = self._sidecar(path)
         if not sidecar.exists():
@@ -232,10 +326,15 @@ class JsonSidecarParser(MetadataParser):
         if not isinstance(data, dict):
             return {}
 
-        def match_one(keys: tuple[str, ...]) -> str | None:
+        result: dict[str, str | int] = {}
+        for field_name, keys in self.key_synonyms:
             for key in keys:
-                if key in data:
-                    return str(data[key])
-            return None
-
-        return self.key_synonyms.extract(match_one)
+                if key not in data:
+                    continue
+                raw = data[key]
+                if field_name in _DATETIME_FIELDS and isinstance(raw, int) and not isinstance(raw, bool):
+                    result[field_name] = raw
+                else:
+                    result[field_name] = str(raw)
+                break
+        return result

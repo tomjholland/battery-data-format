@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .file_utils import is_url, read_head, resolve_source, strip_compression_suffix
 from .metadata_parsers import JsonSidecarParser, MetadataParser, MetadataRules, TxtPreambleParser
-from .table_normalizers import BDF_NORMALIZER, NDA_NORMALIZER, NORMALIZERS, TableNormalizer
+from .table_normalizers import _MACCOR_DT_FMTS, BDF_NORMALIZER, NDA_NORMALIZER, NORMALIZERS, TableNormalizer
 from .table_parsers import (
     DelimTxtParser,
     ExcelParser,
@@ -148,7 +148,22 @@ class Plugin(BaseModel):
 # Each plugin's normalizer lives inside its table parser. ``neware_csv`` and
 # ``neware_xlsx`` share the one ``NORMALIZERS["neware"]`` instance across two
 # distinct table parsers.
+#
+# ``_BASYTEC_DT_FMTS`` and ``_BIOLOGIC_DT_FMTS`` coerce each plugin's preamble
+# ``started_at`` text to epoch seconds; neither vendor's table normalizer parses
+# an absolute datetime column, so no shared table-side constant exists for them.
 # ---------------------------------------------------------------------------
+
+_BASYTEC_DT_FMTS = ("%d.%m.%Y %H:%M:%S",)
+# BT-Lab/EC-Lab write the acquisition timestamp in the preamble; the .mpt table
+# itself carries elapsed time only, so this format has no column counterpart.
+# Only the US-order form is declared: EC-Lab follows the machine locale, and a
+# day-first candidate would silently win on ambiguous dates like 05/06/2024. An
+# unparsed timestamp leaves the field unset, which is the safer failure.
+_BIOLOGIC_DT_FMTS = (
+    "%m/%d/%Y %H:%M:%S%.f",
+    "%m/%d/%Y %H:%M:%S",
+)
 
 ARBIN_CSV = Plugin(
     table_parser=DelimTxtParser(normalizer=NORMALIZERS["arbin"]),
@@ -174,6 +189,7 @@ BASYTEC_TXT = Plugin(
         ),
         encoding="latin-1",
         regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"~Start of Test:\s*(.+)")),
+        datetime_formats=_BASYTEC_DT_FMTS,
     ),
 )
 
@@ -186,6 +202,7 @@ BIOLOGIC_MPT = Plugin(
     metadata_parser=TxtPreambleParser(
         magic=("bt-lab ascii file", "ec-lab ascii file"),
         regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"Acquisition started on\s*:\s*(.+)")),
+        datetime_formats=_BIOLOGIC_DT_FMTS,
     ),
 )
 
@@ -208,6 +225,7 @@ MACCOR_CSV = Plugin(
     metadata_parser=TxtPreambleParser(
         magic=("today's date ,", "date of test:,"),
         regex_patterns=MetadataRules[re.Pattern[str]](started_at=re.compile(r"Date of Test:,(.+)")),
+        datetime_formats=_MACCOR_DT_FMTS,
     ),
 )
 
