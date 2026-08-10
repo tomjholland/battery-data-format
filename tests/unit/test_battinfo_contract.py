@@ -6,18 +6,22 @@ must resolve to a property in the corresponding pinned upstream schema, so an
 upstream rename that would silently break the handoff instead fails this test
 with a one-line fix (rename the field on the hand-written model, refresh the
 fixture per ``tests/fixtures/battinfo/README.md``).
-
-Imports of ``bdf.battinfo_records`` are made inside each test body rather
-than at module level.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import types
 import typing
 from pathlib import Path
 from typing import Any
+
+import pydantic
+
+import bdf.battinfo_records
+from bdf.battinfo_records import DatasetRecord, Provenance, ReadMetadata, TestRecord
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "battinfo"
 
@@ -142,7 +146,6 @@ def test_provenance_fields_resolve_upstream() -> None:
     shared provenance module (``modules/common/provenance.schema.json``),
     and the walk covers at least the fields BDF's records write into
     ``provenance``."""
-    from bdf.battinfo_records import Provenance
 
     doc = _load_schema("provenance.schema.json")
 
@@ -160,7 +163,6 @@ def test_test_record_fields_resolve_upstream() -> None:
     definition covered separately by
     ``test_provenance_fields_resolve_upstream``), and the walk covers at
     least the fields the test-record model declares."""
-    from bdf.battinfo_records import TestRecord
 
     doc = _load_schema("test.schema.json")
 
@@ -191,7 +193,6 @@ def test_dataset_record_fields_resolve_upstream() -> None:
     (not the shared module, which is a distinct definition covered
     separately by ``test_provenance_fields_resolve_upstream``), and the walk
     covers at least the fields the dataset-record model declares."""
-    from bdf.battinfo_records import DatasetRecord
 
     doc = _load_schema("dataset.schema.json")
 
@@ -220,19 +221,14 @@ def test_no_runtime_battinfo_import() -> None:
     battinfo[processing] -> batterydf dependency direction acyclic: the
     module source carries no import naming it, and a fresh record's
     ``to_dict()`` serialisation carries no trace of it either."""
-    import ast
-    import inspect
-
-    import bdf.battinfo_records as battinfo_records
-
-    tree = ast.parse(inspect.getsource(battinfo_records))
+    tree = ast.parse(inspect.getsource(bdf.battinfo_records))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert all(alias.name.split(".")[0] != "battinfo" for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             assert node.module is None or node.module.split(".")[0] != "battinfo"
 
-    dumped = battinfo_records.ReadMetadata().to_dict()
+    dumped = ReadMetadata().to_dict()
     assert isinstance(dumped, dict)
     assert "battinfo" not in json.dumps(dumped)
 
@@ -241,9 +237,6 @@ def test_read_metadata_exposes_no_importer_adapter() -> None:
     """The serialised ``ReadMetadata`` is the handoff contract itself: the
     only public method BDF adds is ``to_dict()`` — no ``to_battinfo`` or
     other adapter producing importer keyword arguments."""
-    import pydantic
-
-    from bdf.battinfo_records import ReadMetadata
 
     def _public_methods(cls: type) -> set[str]:
         return {name for name in dir(cls) if not name.startswith("_") and callable(getattr(cls, name))}
