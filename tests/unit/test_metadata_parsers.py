@@ -391,6 +391,71 @@ class TestJsonSidecarParser:
         assert parser in frozenset({parser})
 
 
+class TestTypedStagingRecord:
+    """Parsers return a hand-written BattINFO test-section instance, not a bare dict."""
+
+    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
+    def test_base_parser_returns_empty_test_section(self, tmp_path: Path) -> None:
+        """MetadataParser().parse() returns an empty TestSection with every field unset."""
+        p = tmp_path / "f.txt"
+        p.write_text("anything")
+        result = MetadataParser().parse(p, tz="UTC")
+        assert isinstance(result, TestSection)
+        assert _parsed_fields(result) == {}
+
+    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
+    def test_workspace_owned_fields_stay_unset_for_every_parser(self, tmp_path: Path) -> None:
+        """id, cell_id, and kind on the returned record stay unset for every parser type."""
+        txt_path = tmp_path / "f.txt"
+        txt_path.write_text("~Instrument: Maccor 4000\n")
+        txt_parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+
+        data_path = tmp_path / "cell.csv"
+        data_path.write_text("a,b\n1,2\n")
+        (tmp_path / "cell.json").write_text(json.dumps({"instrument_name": "Maccor 4000"}))
+        json_parser = JsonSidecarParser(key_synonyms=MetadataRules(instrument_name=("instrument_name",)))
+
+        for parser, path in (
+            (MetadataParser(), txt_path),
+            (txt_parser, txt_path),
+            (json_parser, data_path),
+        ):
+            result = parser.parse(path, tz="UTC")
+            assert isinstance(result, TestSection)
+            assert not hasattr(result, "id")
+            assert not hasattr(result, "cell_id")
+            assert not hasattr(result, "kind")
+
+    def test_json_parse_non_integer_datetime_leaves_field_unset(self, tmp_path: Path) -> None:
+        """A started_at value that is not a real integer stays unset; a sibling int field still passes through."""
+        data_path = tmp_path / "cell.csv"
+        data_path.write_text("a,b\n1,2\n")
+        (tmp_path / "cell.json").write_text(json.dumps({"started_at": "2024-01-01T00:00:00", "ended_at": 1704106800}))
+        parser = JsonSidecarParser(key_synonyms=MetadataRules(started_at=("started_at",), ended_at=("ended_at",)))
+        result = parser.parse(data_path, tz="UTC")
+        assert _parsed_fields(result) == {"ended_at": 1704106800}
+
+    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
+    def test_json_sidecar_and_txt_preamble_return_the_same_type(self, tmp_path: Path) -> None:
+        """JsonSidecarParser resolves synonyms into the same TestSection type TxtPreambleParser returns."""
+        data_path = tmp_path / "cell.csv"
+        data_path.write_text("a,b\n1,2\n")
+        (tmp_path / "cell.json").write_text(json.dumps({"InstrumentName": "Maccor 4000"}))
+        json_parser = JsonSidecarParser(
+            key_synonyms=MetadataRules(instrument_name=("instrument_name", "InstrumentName"))
+        )
+        json_result = json_parser.parse(data_path, tz="UTC")
+
+        txt_path = tmp_path / "f.txt"
+        txt_path.write_text("~Instrument: Maccor 4000\n")
+        txt_parser = TxtPreambleParser(regex_patterns=MetadataRules[re.Pattern[str]](instrument_name=INSTRUMENT_RX))
+        txt_result = txt_parser.parse(txt_path, tz="UTC")
+
+        assert isinstance(json_result, TestSection)
+        assert type(json_result) is type(txt_result)
+        assert json_result.instrument_name == "Maccor 4000"  # type: ignore[attr-defined]
+
+
 class TestMixedParserTypes:
     """Mixed parser types coexist in a frozenset."""
 
