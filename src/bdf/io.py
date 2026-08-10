@@ -56,7 +56,7 @@ def _read(
 
     metadata: dict = {
         "source": plugin_id or "custom",
-        **resolved_plugin.metadata_parser.parse(path),
+        **resolved_plugin.metadata_parser.parse(path, tz=tz).to_dict(),
     }
 
     if normalize:

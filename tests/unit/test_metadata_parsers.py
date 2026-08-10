@@ -394,7 +394,6 @@ class TestJsonSidecarParser:
 class TestTypedStagingRecord:
     """Parsers return a hand-written BattINFO test-section instance, not a bare dict."""
 
-    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
     def test_base_parser_returns_empty_test_section(self, tmp_path: Path) -> None:
         """MetadataParser().parse() returns an empty TestSection with every field unset."""
         p = tmp_path / "f.txt"
@@ -403,7 +402,6 @@ class TestTypedStagingRecord:
         assert isinstance(result, TestSection)
         assert _parsed_fields(result) == {}
 
-    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
     def test_workspace_owned_fields_stay_unset_for_every_parser(self, tmp_path: Path) -> None:
         """id, cell_id, and kind on the returned record stay unset for every parser type."""
         txt_path = tmp_path / "f.txt"
@@ -435,7 +433,6 @@ class TestTypedStagingRecord:
         result = parser.parse(data_path, tz="UTC")
         assert _parsed_fields(result) == {"ended_at": 1704106800}
 
-    @pytest.mark.xfail(strict=True, reason="MetadataParser.parse does not yet return a TestSection record")
     def test_json_sidecar_and_txt_preamble_return_the_same_type(self, tmp_path: Path) -> None:
         """JsonSidecarParser resolves synonyms into the same TestSection type TxtPreambleParser returns."""
         data_path = tmp_path / "cell.csv"

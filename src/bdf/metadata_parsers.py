@@ -19,6 +19,10 @@ can be a ``frozenset``.
 coerces the text its regexes matched with :func:`bdf._datetime_fmt.to_epoch_seconds`;
 :class:`JsonSidecarParser` passes a real JSON integer through unchanged for those two
 fields instead of stringifying it.
+
+Every parser's :meth:`~MetadataParser.parse` returns a hand-written
+:class:`~bdf.battinfo_records.TestSection` instance, not a bare dict, so a caller
+gets the same typed staging record regardless of which parser produced it.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from typing import Callable, Generic, Iterator, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ._datetime_fmt import to_epoch_seconds
+from .battinfo_records import TestSection
 from .file_utils import read_head
 
 T = TypeVar("T")
@@ -163,7 +168,7 @@ class MetadataParser(BaseModel):
         """
         return False
 
-    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> TestSection:
         """Extract BDF metadata fields from ``path``. Base: nothing.
 
         Args:
@@ -172,9 +177,9 @@ class MetadataParser(BaseModel):
                 base class, which extracts nothing.
 
         Returns:
-            Empty dict for base class (override in subclasses).
+            An empty TestSection for the base class (override in subclasses).
         """
-        return {}
+        return TestSection()
 
 
 class TxtPreambleParser(MetadataParser):
@@ -242,7 +247,7 @@ class TxtPreambleParser(MetadataParser):
                 return True
         return False
 
-    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> TestSection:
         """Decode the head with ``encoding`` and apply each regex; first match per field.
 
         Args:
@@ -250,8 +255,8 @@ class TxtPreambleParser(MetadataParser):
             tz: IANA timezone applied to naive matched started_at/ended_at text.
 
         Returns:
-            Dictionary mapping field names to extracted values (first match per
-            regex), with started_at/ended_at coerced to integer epoch seconds.
+            A TestSection with each field set to its first regex match, and
+            started_at/ended_at coerced to integer epoch seconds.
         """
         head = read_head(path)
         lines = head.decode(self.encoding, errors="replace").splitlines()
@@ -264,7 +269,7 @@ class TxtPreambleParser(MetadataParser):
             return None
 
         matched = self.regex_patterns.extract(match_one)
-        return _coerce_preamble_datetimes(matched, self.datetime_formats, tz)
+        return TestSection(**_coerce_preamble_datetimes(matched, self.datetime_formats, tz))
 
 
 class JsonSidecarParser(MetadataParser):
@@ -273,7 +278,10 @@ class JsonSidecarParser(MetadataParser):
     ``key_synonyms`` holds an ordered tuple of candidate JSON keys per set field;
     :meth:`parse` returns the value of the first synonym key present in the JSON.
     A real JSON integer matched for ``started_at``/``ended_at`` passes through
-    unchanged, since it is already epoch seconds; every other value is stringified.
+    unchanged, since it is already epoch seconds; any other value matched for
+    those two fields leaves the field unset rather than being stringified, since
+    :class:`~bdf.battinfo_records.TestSection` types them as ``int | None``.
+    Every other field's matched value is stringified.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -306,7 +314,7 @@ class JsonSidecarParser(MetadataParser):
         """
         return self._sidecar(path).exists()
 
-    def parse(self, path: str | Path, *, tz: str = "UTC") -> dict[str, str | int]:
+    def parse(self, path: str | Path, *, tz: str = "UTC") -> TestSection:
         """Load the sidecar JSON and resolve each set field's synonym keys (first match).
 
         Args:
@@ -314,17 +322,17 @@ class JsonSidecarParser(MetadataParser):
             tz: Unused; the sidecar has no text datetime formats to localise.
 
         Returns:
-            Dictionary mapping field names to extracted values from the sidecar
-            JSON: a real integer for a matched started_at/ended_at key, else the
-            value stringified.
+            A TestSection built from the sidecar JSON: a real integer for a
+            matched started_at/ended_at key, that field left unset when the
+            matched value is not a real integer, else the value stringified.
         """
         sidecar = self._sidecar(path)
         if not sidecar.exists():
-            return {}
+            return TestSection()
         with open(sidecar, encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return {}
+            return TestSection()
 
         result: dict[str, str | int] = {}
         for field_name, keys in self.key_synonyms:
@@ -332,9 +340,11 @@ class JsonSidecarParser(MetadataParser):
                 if key not in data:
                     continue
                 raw = data[key]
-                if field_name in _DATETIME_FIELDS and isinstance(raw, int) and not isinstance(raw, bool):
-                    result[field_name] = raw
+                is_real_int = isinstance(raw, int) and not isinstance(raw, bool)
+                if field_name in _DATETIME_FIELDS:
+                    if is_real_int:
+                        result[field_name] = raw
                 else:
                     result[field_name] = str(raw)
                 break
-        return result
+        return TestSection(**result)
