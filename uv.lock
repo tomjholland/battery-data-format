@@ -139,6 +139,7 @@ version = "0.2.0rc3"
 source = { editable = "." }
 dependencies = [
     { name = "babel" },
+    { name = "jsonschema" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -150,6 +151,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "rdflib" },
+    { name = "referencing" },
     { name = "requests" },
     { name = "rich" },
     { name = "typer" },
@@ -259,6 +261,7 @@ requires-dist = [
     { name = "fastnda", marker = "extra == 'nda'", specifier = ">=1.2.0" },
     { name = "holoviews", marker = "extra == 'hvplot'" },
     { name = "hvplot", marker = "extra == 'hvplot'" },
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=1.24,<3.0" },
     { name = "pandas", specifier = ">=2.0" },
@@ -272,6 +275,7 @@ requires-dist = [
     { name = "pyodbc", marker = "sys_platform == 'win32' and extra == 'arbin-res'" },
     { name = "pyyaml", marker = "extra == 'yaml'", specifier = ">=6.0.3" },
     { name = "rdflib", specifier = ">=7.0" },
+    { name = "referencing", specifier = ">=0.35" },
     { name = "requests", specifier = ">=2.31" },
     { name = "rich", specifier = ">=13.7" },
     { name = "scipy", marker = "extra == 'mat'", specifier = ">=1.15.3" },
