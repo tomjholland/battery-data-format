@@ -7,8 +7,9 @@ The record models are generated from the bundled upstream schemas
 from __future__ import annotations
 
 from bdf.battinfo._pin import bundle_pin
+from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, SchemaError
 
-__all__ = ["bundle_pin", "bundled_ref"]
+__all__ = ["BATTINFO_SCHEMA", "BattinfoSchema", "SchemaError", "bundle_pin", "bundled_ref"]
 
 
 def bundled_ref() -> str | None:
