@@ -193,7 +193,7 @@ def test_cell_naming_and_conditions_targets_construct(tmp_path: Path) -> None:
         }
     )
     meta = parser.parse(data)
-    cond = meta.battinfo_test.test.conditions["temperature_c"]  # type: ignore[union-attr,index]
+    cond = meta.battinfo_test.test.conditions.temperature_c  # type: ignore[union-attr]
     assert cond.value == 25
     assert cond.unit_text == "degC"
 
