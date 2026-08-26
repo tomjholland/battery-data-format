@@ -24,7 +24,7 @@ from scripts.update_battinfo import load_managed, schema_dir  # noqa: E402
 # `src/bdf/data/battinfo/VERSION` at this commit, and upstream declares these
 # constants at that commit: `SCHEMA_VERSION = "0.2.0"` in
 # `battinfo/bundle.py`, and `__version__ = "0.7.0"` in `battinfo/__init__.py`.
-_PINNED_REF = "5ff1a6f2590795765978bd8088e2e6a8c5c146f3"
+_PINNED_REF = "0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88"
 _PINNED_SCHEMA_VERSION = "0.2.0"
 
 

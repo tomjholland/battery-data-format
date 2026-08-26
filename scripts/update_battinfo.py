@@ -19,6 +19,9 @@ commit that reformats a file, or that touches nothing under ``assets/schemas/``,
 reports no difference. CI runs this mode on every pull request, which is why an
 unrelated upstream commit does not turn a pull request red.
 
+``bdf.battinfo._fetch`` owns the managed paths and the transport, and this
+script calls them, so the script and a run-time load name the same files.
+
 BDF pins nine upstream schema files under ``bdf/data/battinfo/schemas/``: the
 five entity schemas (``test``, ``cell-instance``, ``channel``, ``equipment``,
 ``test-protocol``), ``cell-instance``'s ``cell-canonical`` dependency, and the
@@ -44,27 +47,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from bdf.battinfo._fetch import MANAGED_SCHEMA_PATHS, fetch_documents
 from bdf.battinfo._pin import refresh
+from bdf.battinfo.schema import SchemaError
 
 _REPO = "BIG-MAP/BattINFO"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-
-# Upstream paths (within BIG-MAP/BattINFO) for the managed schema files,
-# keyed by their path relative to the bundled schema directory.
-MANAGED_SCHEMA_PATHS: dict[str, str] = {
-    "test.schema.json": "assets/schemas/test.schema.json",
-    "cell-instance.schema.json": "assets/schemas/cell-instance.schema.json",
-    "cell-canonical.schema.json": "assets/schemas/cell-canonical.schema.json",
-    "channel.schema.json": "assets/schemas/channel.schema.json",
-    "equipment.schema.json": "assets/schemas/equipment.schema.json",
-    "test-protocol.schema.json": "assets/schemas/test-protocol.schema.json",
-    "dataset.schema.json": "assets/schemas/dataset.schema.json",
-    "modules/common/quantitative-properties.schema.json": "assets/schemas/modules/common/quantitative-properties.schema.json",
-    "modules/common/quantity.schema.json": "assets/schemas/modules/common/quantity.schema.json",
-}
-
-RAW_URL_TEMPLATE = f"https://raw.githubusercontent.com/{_REPO}/{{ref}}/{{path}}"
-"""The raw upstream URL one managed file is fetched from, by ref and path."""
 
 COMMIT_URL_TEMPLATE = f"https://api.github.com/repos/{_REPO}/commits/{{ref}}"
 """The upstream API URL that resolves a branch, tag, or commit to a commit."""
@@ -176,6 +164,9 @@ def load_version(source: Path | None = None) -> dict[str, str]:
 def fetch_schemas(ref: str) -> dict[str, bytes]:
     """Fetch the managed schema files at ``ref``.
 
+    The package owns the paths and the transport, so the script and a
+    run-time load cannot name different files.
+
     Args:
         ref: Upstream ``BIG-MAP/BattINFO`` commit or tag to pin.
 
@@ -184,22 +175,13 @@ def fetch_schemas(ref: str) -> dict[str, bytes]:
 
     Raises:
         requests.HTTPError: A schema fetch failed.
-        RuntimeError: Fetched content is not valid JSON.
+        RuntimeError: Fetched content is not valid JSON, or exceeds the size
+            cap the package declares.
     """
-    import requests
-
-    fetched: dict[str, bytes] = {}
-    for rel_name, upstream_path in MANAGED_SCHEMA_PATHS.items():
-        url = RAW_URL_TEMPLATE.format(ref=ref, path=upstream_path)
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        content = response.content
-        try:
-            json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Fetched content for {rel_name} from {url} is not valid JSON: {exc}") from exc
-        fetched[rel_name] = content
-    return fetched
+    try:
+        return fetch_documents(ref)
+    except SchemaError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def resolve_ref(ref: str) -> str:

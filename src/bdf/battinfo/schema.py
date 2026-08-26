@@ -273,8 +273,15 @@ class BattinfoSchema:
 
         Returns:
             The loaded set at ``ref``.
+
+        Raises:
+            ValueError: ``ref`` is not 40 hexadecimal characters. The fetch
+                makes no request.
+            SchemaError: A document exceeds the size cap, or does not parse.
         """
-        raise NotImplementedError
+        from bdf.battinfo._fetch import _from_ref
+
+        return _from_ref(ref, refresh)
 
 
 def bundled_schema_dir() -> Path:
