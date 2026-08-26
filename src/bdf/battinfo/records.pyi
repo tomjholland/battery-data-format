@@ -64,6 +64,7 @@ class BattinfoTest2:
     description: str | None
     ended_at: int | None
     equipment_id: str | None
+    handle: str | None
     id: str | None
     identifier: str | None
     instrument_name: str | None
@@ -79,7 +80,28 @@ class BattinfoTest2:
     def validate(self) -> list[str]: ...
 
 class BattinfoConditions:
-    def __getattr__(self, name: str) -> Any: ...
+    def __getattr__(self, name: str) -> BattinfoQuantity: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoQuantity:
+    co_type: str | None
+    conditions: BattinfoConditions2
+    max_value: float | None
+    min_value: float | None
+    sample_count: int | None
+    standard_deviation: float | None
+    typical_value: float | None
+    unit: str | None
+    unit_text: str | None
+    value: float | str | None
+    value_basis: str | None
+    value_text: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoConditions2:
+    def __getattr__(self, name: str) -> BattinfoQuantity: ...
     def to_dict(self) -> dict[str, Any]: ...
     def validate(self) -> list[str]: ...
 
@@ -112,6 +134,7 @@ class BattinfoCellInstance2:
     dpp_status: str | None
     expires_at: int | str | None
     grade: str | None
+    handle: str | None
     id: str | None
     manufactured_at: int | str | None
     name: str | None
@@ -155,7 +178,9 @@ class BattinfoSpecSet:
     capacity_fade: BattinfoSpecItem
     capacity_threshold_exhaustion: BattinfoSpecItem
     certified_usable_energy: BattinfoSpecItem
+    charging_capacity: BattinfoSpecItem
     charging_cutoff_voltage: BattinfoSpecItem
+    charging_energy: BattinfoSpecItem
     charging_temperature_max: BattinfoSpecItem
     charging_temperature_min: BattinfoSpecItem
     charging_time: BattinfoSpecItem
@@ -166,10 +191,14 @@ class BattinfoSpecSet:
     cycle_life_c_rate: BattinfoSpecItem
     dc_internal_resistance: BattinfoSpecItem
     diameter: BattinfoSpecItem
+    discharging_capacity: BattinfoSpecItem
     discharging_cutoff_voltage: BattinfoSpecItem
+    discharging_energy: BattinfoSpecItem
     discharging_temperature_max: BattinfoSpecItem
     discharging_temperature_min: BattinfoSpecItem
+    electrode_area: BattinfoSpecItem
     energy_density: BattinfoSpecItem
+    external_surface_area: BattinfoSpecItem
     height: BattinfoSpecItem
     impedance: BattinfoSpecItem
     initial_coulombic_efficiency: BattinfoSpecItem
@@ -221,6 +250,8 @@ class BattinfoSpecSet:
     def validate(self) -> list[str]: ...
 
 class BattinfoSpecItem:
+    co_type: str | None
+    conditions: BattinfoConditions3
     max_value: float | None
     min_value: float | None
     raw: BattinfoRawExtraction
@@ -231,7 +262,13 @@ class BattinfoSpecItem:
     unit_code: str | None
     unit_text: str | None
     value: float | None
+    value_basis: str | None
     value_text: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoConditions3:
+    def __getattr__(self, name: str) -> BattinfoQuantity: ...
     def to_dict(self) -> dict[str, Any]: ...
     def validate(self) -> list[str]: ...
 
@@ -269,6 +306,7 @@ class BattinfoChannelInstance:
 class BattinfoChannel:
     comment: str | None
     equipment_id: str | None
+    handle: str | None
     id: str | None
     index: int | None
     label: str | None
@@ -279,26 +317,6 @@ class BattinfoChannel:
     def validate(self) -> list[str]: ...
 
 class BattinfoQuantitativeProperties:
-    def __getattr__(self, name: str) -> BattinfoQuantity: ...
-    def to_dict(self) -> dict[str, Any]: ...
-    def validate(self) -> list[str]: ...
-
-class BattinfoQuantity:
-    co_type: str | None
-    conditions: BattinfoConditions2
-    max_value: float | None
-    min_value: float | None
-    sample_count: int | None
-    standard_deviation: float | None
-    typical_value: float | None
-    unit: str | None
-    unit_text: str | None
-    value: float | str | None
-    value_text: str | None
-    def to_dict(self) -> dict[str, Any]: ...
-    def validate(self) -> list[str]: ...
-
-class BattinfoConditions2:
     def __getattr__(self, name: str) -> BattinfoQuantity: ...
     def to_dict(self) -> dict[str, Any]: ...
     def validate(self) -> list[str]: ...
@@ -327,6 +345,7 @@ class BattinfoEquipment:
     comment: str | None
     commissioned_at: int | str | None
     equipment_spec_id: str | None
+    handle: str | None
     id: str | None
     location: str | None
     name: str | None
@@ -423,6 +442,7 @@ class BattinfoSafety:
 
 class BattinfoTestSpec:
     description: str | None
+    handle: str | None
     id: str | None
     identifier: str | None
     kind: str | None
@@ -430,5 +450,137 @@ class BattinfoTestSpec:
     protocol_url: str | None
     short_id: str | None
     version: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoDatasetSchemaOrgAligned:
+    contributor: list[dict[str, Any]] | None
+    dataset: BattinfoDataset
+    funding: BattinfoFunding4
+    notes: list[str] | None
+    provenance: BattinfoProvenance6
+    schema_version: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoDataset:
+    about: list[str] | None
+    access_url: str | None
+    additional_type: str | list[str] | None
+    citations: list[dict[str, Any]] | None
+    conditions_of_access: str | None
+    created_at: int | None
+    creators: list[dict[str, Any]] | None
+    description: str | None
+    distributions: list[dict[str, Any]] | None
+    funders: list[dict[str, Any]] | None
+    handle: str | None
+    id: str | None
+    identifier: BattinfoIdentifier
+    in_language: str | None
+    included_in_data_catalog: BattinfoIncludedInDataCatalog
+    is_accessible_for_free: bool | None
+    is_based_on: list[str] | None
+    keywords: list[str] | None
+    license: str | None
+    main_entity: BattinfoMainEntity
+    measurement_methods: list[str] | None
+    measurement_techniques: list[str] | None
+    modified_at: int | None
+    name: str | None
+    published_at: int | None
+    publisher: BattinfoOrganization
+    same_as: list[str] | None
+    series_id: str | None
+    short_id: str | None
+    spatial_coverage: str | None
+    temporal_coverage: str | None
+    variable_measured: list[dict[str, Any]] | None
+    version: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoIdentifier:
+    property_id: str | None
+    value: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoIncludedInDataCatalog:
+    description: str | None
+    id: str | None
+    name: str | None
+    same_as: str | None
+    type: Any | None
+    url: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoMainEntity:
+    description: str | None
+    id: str | None
+    name: str | None
+    table_schema: BattinfoTableSchema
+    type: Any | None
+    url: str | None
+    table: list[dict[str, Any]] | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoTableSchema:
+    columns: list[dict[str, Any]] | None
+    description: str | None
+    id: str | None
+    name: str | None
+    primary_key: str | list[str] | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoOrganization:
+    name: str | None
+    same_as: str | None
+    type: Any | None
+    url: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoFunding4:
+    acronym: str | None
+    funder: BattinfoFunder4
+    id: str | None
+    identifier: str | None
+    name: str | None
+    program: str | None
+    type: Any | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoFunder4:
+    name: str | None
+    same_as: str | None
+    type: Any | None
+    url: str | None
+    def to_dict(self) -> dict[str, Any]: ...
+    def validate(self) -> list[str]: ...
+
+class BattinfoProvenance6:
+    battinfo_version: str | None
+    citation: str | None
+    citation_doi: str | None
+    comment: str | None
+    curated_by: str | None
+    file_hash: str | None
+    ingest_status: str | None
+    quality_flags: list[str] | None
+    retrieved_at: int | None
+    source_dataset_key: str | None
+    source_file: str | None
+    source_name: str | None
+    source_row: int | None
+    source_sheet: str | None
+    source_type: str | None
+    source_url: str | None
+    source_workbook_sha256: str | None
+    workflow_version: str | None
     def to_dict(self) -> dict[str, Any]: ...
     def validate(self) -> list[str]: ...

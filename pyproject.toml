@@ -182,6 +182,7 @@ packages = [
 include = [
   "src/bdf/schemas/*.json",
   "src/bdf/data/bdf-ontology-snapshot.ttl",
+  "src/bdf/py.typed",
 ]
 
 [tool.hatch.build.targets.sdist]

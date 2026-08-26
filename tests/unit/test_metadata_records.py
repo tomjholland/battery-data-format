@@ -73,7 +73,7 @@ def test_assignment_is_type_checked() -> None:
     meta = Metadata()
 
     with pytest.raises(SchemaError):
-        meta.battinfo_test.test.started_at = "not-a-timestamp"
+        meta.battinfo_test.test.started_at = "not-a-timestamp"  # type: ignore[assignment]
 
 
 def test_bad_enum_value_is_refused() -> None:
@@ -105,7 +105,7 @@ def test_an_undeclared_field_raises() -> None:
     meta = Metadata()
 
     with pytest.raises(AttributeError):
-        meta.battinfo_test.test.rig_bay = "B7"
+        meta.battinfo_test.test.rig_bay = "B7"  # type: ignore[attr-defined]
 
 
 def test_a_nested_undeclared_key_fails_construction() -> None:
