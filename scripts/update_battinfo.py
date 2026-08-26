@@ -63,6 +63,7 @@ _ENTITY_DOCS: list[str] = [
     "channel.schema.json",
     "equipment.schema.json",
     "test-protocol.schema.json",
+    "dataset.schema.json",
 ]
 """The managed documents whose root node the type stubs declare a record class for."""
 

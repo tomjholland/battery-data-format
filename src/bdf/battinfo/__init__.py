@@ -15,7 +15,15 @@ from bdf.battinfo._pin import bundle_pin
 from bdf.battinfo.record import Record
 from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, SchemaError
 
-__all__ = ["BATTINFO_SCHEMA", "MANAGED_SCHEMA_PATHS", "BattinfoSchema", "Record", "SchemaError", "bundle_pin", "bundled_ref"]
+__all__ = [
+    "BATTINFO_SCHEMA",
+    "MANAGED_SCHEMA_PATHS",
+    "BattinfoSchema",
+    "Record",
+    "SchemaError",
+    "bundle_pin",
+    "bundled_ref",
+]
 
 
 def bundled_ref() -> str | None:

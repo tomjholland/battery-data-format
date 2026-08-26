@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
     Field,
@@ -16,6 +16,16 @@ from pydantic import (
 from bdf.battinfo._base import _RecordModel
 from bdf.battinfo.record import Record
 from bdf.battinfo.schema import BATTINFO_SCHEMA
+
+if TYPE_CHECKING:
+    from bdf.battinfo.records import (
+        BattinfoCellInstance,
+        BattinfoChannelInstance,
+        BattinfoDatasetSchemaOrgAligned,
+        BattinfoEquipmentInstance,
+        BattinfoTest,
+        BattinfoTestProtocol,
+    )
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -129,22 +139,34 @@ class Metadata(_RecordModel):
     # `bdf`, `raw`, and `extras` cannot live inside a record. Each wrapper key
     # joins `battinfo_` to the upstream entity type, which also keeps a
     # sidecar document distinct from a record document.
-    battinfo_test: Record = Field(default_factory=lambda: _root_record("test.schema.json"))
-    """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
-    battinfo_cell: Record = Field(default_factory=lambda: _root_record("cell-instance.schema.json"))
-    """The physical cell the test ran on, and the cell type it derives from."""
-    battinfo_channel: Record = Field(default_factory=lambda: _root_record("channel.schema.json"))
-    """The one channel of the equipment unit that ran the test."""
-    battinfo_equipment: Record = Field(default_factory=lambda: _root_record("equipment.schema.json"))
-    """The physical equipment unit that ran the test, a named cycler for example."""
-    battinfo_test_protocol: Record = Field(default_factory=lambda: _root_record("test-protocol.schema.json"))
-    """The reusable protocol the test followed: its typed steps, and links to the files that state them."""
-    battinfo_dataset: Record = Field(default_factory=lambda: _root_record("dataset.schema.json"))
-    """The dataset this file belongs to: its distributions (raw and processed files,
-    checksums, formats), identifiers, and links to the cell and test that produced it.
-    Mirrors a pre-1.0 upstream schema and may evolve with it. Nothing fills this
-    record automatically yet: it is the documented place for a user or a downstream
-    tool (e.g. the battinfo package) to record file-level provenance (#92)."""
+    if TYPE_CHECKING:
+        # Annotated against the generated stub classes here alone, so a type
+        # checker sees the fields `bdf.battinfo.records` declares. The stub
+        # module reaches no run time: the field stays a plain `Record` there,
+        # exactly as the branch below declares it.
+        battinfo_test: BattinfoTest
+        battinfo_cell: BattinfoCellInstance
+        battinfo_channel: BattinfoChannelInstance
+        battinfo_equipment: BattinfoEquipmentInstance
+        battinfo_test_protocol: BattinfoTestProtocol
+        battinfo_dataset: BattinfoDatasetSchemaOrgAligned
+    else:
+        battinfo_test: Record = Field(default_factory=lambda: _root_record("test.schema.json"))
+        """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
+        battinfo_cell: Record = Field(default_factory=lambda: _root_record("cell-instance.schema.json"))
+        """The physical cell the test ran on, and the cell type it derives from."""
+        battinfo_channel: Record = Field(default_factory=lambda: _root_record("channel.schema.json"))
+        """The one channel of the equipment unit that ran the test."""
+        battinfo_equipment: Record = Field(default_factory=lambda: _root_record("equipment.schema.json"))
+        """The physical equipment unit that ran the test, a named cycler for example."""
+        battinfo_test_protocol: Record = Field(default_factory=lambda: _root_record("test-protocol.schema.json"))
+        """The reusable protocol the test followed: its typed steps, and links to the files that state them."""
+        battinfo_dataset: Record = Field(default_factory=lambda: _root_record("dataset.schema.json"))
+        """The dataset this file belongs to: its distributions (raw and processed files,
+        checksums, formats), identifiers, and links to the cell and test that produced it.
+        Mirrors a pre-1.0 upstream schema and may evolve with it. Nothing fills this
+        record automatically yet: it is the documented place for a user or a downstream
+        tool (e.g. the battinfo package) to record file-level provenance (#92)."""
     bdf: BdfReadInfo = Field(default_factory=BdfReadInfo)
     """BDF's own audit of this read: the source it read, and every rescale that the time reconciliation applied."""
 
