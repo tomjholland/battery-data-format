@@ -65,20 +65,17 @@ def _conditions_record() -> Record:
 
 
 class TestAssignmentAndRead:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_nested_assignment_needs_no_guard(self) -> None:
         """battinfo-records: A nested assignment needs no guard."""
         _, record = _cell_instance_record()
         record.cell_instance.name = "cell-1"
         assert record.cell_instance.name == "cell-1"
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_an_unset_leaf_reads_as_none(self) -> None:
         """battinfo-records: An unset leaf reads as None."""
         _, record = _cell_instance_record()
         assert record.cell_instance.name is None
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_choice_typed_value_reads_directly(self) -> None:
         """battinfo-records: A choice-typed value reads directly."""
         record = _quantity_record()
@@ -91,14 +88,12 @@ class TestAssignmentAndRead:
 
 
 class TestKeyPattern:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_matching_entry_name_is_accepted(self) -> None:
         """battinfo-records: A matching entry name is accepted."""
         record = _conditions_record()
         record.max_current.value = 5.0
         assert record.max_current.value == 5.0
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_name_outside_the_pattern_is_refused(self) -> None:
         """battinfo-records: A name outside the pattern is refused."""
         record = _conditions_record()
@@ -110,7 +105,6 @@ class TestKeyPattern:
 
 
 class TestRefusals:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_value_outside_an_enumeration_is_refused(self) -> None:
         """battinfo-records: A value outside an enumeration is refused."""
         _, record = _cell_instance_record()
@@ -121,7 +115,6 @@ class TestRefusals:
         for accepted in ("original", "repurposed", "re-used", "remanufactured", "waste"):
             assert accepted in message
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_value_against_a_pattern_is_refused(self) -> None:
         """battinfo-records: A value against a pattern is refused."""
         _, record = _cell_instance_record()
@@ -131,7 +124,6 @@ class TestRefusals:
         assert "short_id" in message
         assert "0-9a-hjkmnp-tv-z" in message
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_value_outside_a_numeric_bound_is_refused(self) -> None:
         """A value outside a declared numeric bound is refused."""
         record = _quantity_record()
@@ -139,7 +131,6 @@ class TestRefusals:
             record.sample_count = 0
         assert "sample_count" in str(exc_info.value)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_value_of_the_wrong_type_is_refused(self) -> None:
         """battinfo-records: A value of the wrong type is refused."""
         _, record = _cell_instance_record()
@@ -147,7 +138,6 @@ class TestRefusals:
             record.cell_instance.name = 123
         assert "name" in str(exc_info.value)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_an_undeclared_field_names_the_schema_version(self) -> None:
         """battinfo-records: An undeclared field names the schema version."""
         _, record = _cell_instance_record()
@@ -160,20 +150,17 @@ class TestRefusals:
 
 
 class TestSerialisation:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_an_unset_field_is_absent(self) -> None:
         """battinfo-records: An unset field is absent."""
         _, record = _cell_instance_record()
         record.cell_instance.name = "cell-1"
         assert record.to_dict() == {"cell_instance": {"name": "cell-1"}}
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_an_empty_record_serialises_to_nothing(self) -> None:
         """battinfo-records: An empty record serialises to nothing."""
         _, record = _cell_instance_record()
         assert record.to_dict() == {}
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_pydantic_dump_matches_to_dict(self) -> None:
         """A record inside a pydantic model dumps to what `to_dict` returns."""
         _, record = _cell_instance_record()
@@ -188,7 +175,6 @@ class TestSerialisation:
 
 
 class TestValidation:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_a_whole_record_validation_lists_every_error(self) -> None:
         """battinfo-records: A whole-record validation lists every error."""
         record = _cell_instance_record_over({"cell_instance": {"battery_status": "not-a-status", "short_id": "!!!"}})
@@ -198,8 +184,20 @@ class TestValidation:
         assert "battery_status" in joined
         assert "short_id" in joined
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.record not implemented")
     def test_an_incomplete_record_reports_no_error(self) -> None:
         """battinfo-records: An incomplete record reports no error."""
         record = _cell_instance_record_over({"cell_instance": {"name": "cell-1"}})
         assert record.validate() == []
+
+
+class TestEquality:
+    def test_two_records_over_equal_data_are_equal(self) -> None:
+        """battinfo-records: Two records over equal data are equal."""
+        first = _cell_instance_record_over({"cell_instance": {"name": "cell-1"}})
+        second = _cell_instance_record_over({"cell_instance": {"name": "cell-1"}})
+        assert first == second
+
+    def test_a_record_equals_no_mapping(self) -> None:
+        """battinfo-records: A record equals no other type."""
+        record = _cell_instance_record_over({"cell_instance": {"name": "cell-1"}})
+        assert record != {"cell_instance": {"name": "cell-1"}}
