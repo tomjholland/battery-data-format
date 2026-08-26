@@ -55,7 +55,6 @@ def _substituted_docs(tmp_path: Path, edit: Any) -> dict[str, dict[str, Any]]:
 
 
 class TestBundledSet:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_loading_needs_no_network(self) -> None:
         """battinfo-schema: Loading needs no network.
 
@@ -64,7 +63,6 @@ class TestBundledSet:
         schema = load_bundled()
         assert isinstance(schema, BattinfoSchema)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_import_loads_bundled_set(self) -> None:
         """battinfo-schema: An import loads the bundled set.
 
@@ -73,7 +71,6 @@ class TestBundledSet:
         schema = load_bundled()
         assert schema.version == _PINNED_SCHEMA_VERSION
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_install_reads_pin_offline(self) -> None:
         """battinfo-bundle-pin: An install reads the pin offline.
 
@@ -86,7 +83,6 @@ class TestBundledSet:
 
 
 class TestSubstitution:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_substituted_schema_widens_an_enumeration(self, tmp_path: Path) -> None:
         """battinfo-schema: A substituted schema widens an enumeration.
 
@@ -114,7 +110,6 @@ class TestSubstitution:
         sub_resolved, _ = substituted.resolve(sub_node, substituted_doc["$id"])
         jsonschema.validate("recertified", sub_resolved)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_substituted_schema_declares_a_new_field(self, tmp_path: Path) -> None:
         """battinfo-schema: A substituted schema declares a new field.
 
@@ -140,7 +135,6 @@ class TestSubstitution:
         sub_resolved, _ = substituted.resolve(sub_node, substituted_doc["$id"])
         jsonschema.validate({"custom_field": "x"}, sub_resolved)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_substitution_runs_no_generated_code(self, tmp_path: Path) -> None:
         """battinfo-schema: Substitution runs no generated code.
 
@@ -163,7 +157,6 @@ class TestSubstitution:
 
 
 class TestRequiredStripping:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_incomplete_record_validates(self) -> None:
         """battinfo-schema: An incomplete record validates.
 
@@ -179,7 +172,6 @@ class TestRequiredStripping:
             jsonschema.validate({"cell_instance": {"name": "cell-1"}}, raw_doc)
         jsonschema.validate({"cell_instance": {"name": "cell-1"}}, resolved)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_nested_required_marker_is_dropped_too(self) -> None:
         """battinfo-schema: A nested required marker is dropped too.
 
@@ -199,7 +191,6 @@ class TestRequiredStripping:
 
 
 class TestReferenceResolution:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_cross_document_reference_resolves(self) -> None:
         """battinfo-schema: A cross-document reference resolves.
 
@@ -214,7 +205,6 @@ class TestReferenceResolution:
         assert resolved_id == docs["cell-canonical.schema.json"]["$id"]
         assert "ac_internal_resistance" in resolved.get("properties", {})
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_combined_node_exposes_every_field(self) -> None:
         """battinfo-schema: A combined node exposes every field.
 
@@ -237,7 +227,6 @@ class TestReferenceResolution:
         assert "left" in resolved["properties"]
         assert "right" in resolved["properties"]
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_self_referring_node_does_not_recurse_without_end(self) -> None:
         """battinfo-schema: A self-referring node does not recurse without end.
 
@@ -252,7 +241,6 @@ class TestReferenceResolution:
 
 
 class TestReferenceErrors:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_reference_chain_over_twenty_links_raises(self) -> None:
         """A reference chain over 20 links raises `SchemaError` naming the chain."""
         docs: dict[str, dict[str, Any]] = {"chain.schema.json": {"$id": "https://example.test/chain.schema.json"}}
@@ -264,7 +252,6 @@ class TestReferenceErrors:
             schema.resolve(node, doc["$id"])
         assert "https://example.test/chain.schema.json" in str(exc_info.value)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_unknown_identifier_raises(self) -> None:
         """An unknown identifier raises `SchemaError` naming it."""
         docs = _bundled_docs()
@@ -276,7 +263,6 @@ class TestReferenceErrors:
 
 
 class TestDocumentErrors:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo.schema not implemented")
     def test_document_with_no_id_raises(self) -> None:
         """A document with no `$id` raises `ValueError` naming the file."""
         docs = {"broken.schema.json": {"type": "object"}}
