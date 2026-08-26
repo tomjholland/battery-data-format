@@ -20,7 +20,7 @@ from scripts.update_battinfo import (  # noqa: E402
     MANAGED_SCHEMA_PATHS as SCRIPT_MANAGED_SCHEMA_PATHS,
 )
 
-_REF = "5ff1a6f2590795765978bd8088e2e6a8c5c146f3"
+_REF = "0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88"
 
 # Mirrors `scripts.update_battinfo.MANAGED_SCHEMA_PATHS`, one mock body per
 # managed schema file.
@@ -31,6 +31,7 @@ _MOCK_MANAGED_SCHEMA_CONTENT: dict[str, bytes] = {
     "channel.schema.json": b'{"$id": "https://example.test/channel.schema.json", "properties": {}}',
     "equipment.schema.json": b'{"$id": "https://example.test/equipment.schema.json", "properties": {}}',
     "test-protocol.schema.json": b'{"$id": "https://example.test/test-protocol.schema.json", "properties": {}}',
+    "dataset.schema.json": b'{"$id": "https://example.test/dataset.schema.json", "properties": {}}',
     "modules/common/quantitative-properties.schema.json": (
         b'{"$id": "https://example.test/quantitative-properties.schema.json"}'
     ),
@@ -56,7 +57,6 @@ def _mock_responses(overrides: dict[str, bytes] | None = None) -> list[Mock]:
 
 
 class TestFetch:
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_fetch_at_a_commit_loads_that_schema_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """battinfo-schema: A fetch at a commit loads that schema set.
 
@@ -70,7 +70,6 @@ class TestFetch:
         assert schema.ref == _REF
         assert mock_get.call_count == len(MANAGED_SCHEMA_PATHS)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_a_branch_name_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """battinfo-schema: A branch name is refused.
 
@@ -83,7 +82,6 @@ class TestFetch:
                 BattinfoSchema.from_ref("main")
             mock_get.assert_not_called()
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_an_unparseable_document_fails_the_fetch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """battinfo-schema: An unparseable document fails the fetch.
 
@@ -96,7 +94,6 @@ class TestFetch:
             BattinfoSchema.from_ref(_REF)
         assert list(tmp_path.rglob("*")) == []
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_a_document_that_exceeds_the_size_cap_fails_the_fetch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -112,7 +109,6 @@ class TestFetch:
             BattinfoSchema.from_ref(_REF)
         assert list(tmp_path.rglob("*")) == []
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_a_second_load_of_the_same_commit_reads_the_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -129,7 +125,6 @@ class TestFetch:
         second_get.assert_not_called()
         assert first_call_count == len(MANAGED_SCHEMA_PATHS)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_a_refresh_refetches(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """battinfo-schema: A refresh refetches.
 
@@ -143,7 +138,6 @@ class TestFetch:
             BattinfoSchema.from_ref(_REF, refresh=True)
         assert second_get.call_count == len(MANAGED_SCHEMA_PATHS)
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_the_cache_honours_the_cache_directory_setting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -158,7 +152,6 @@ class TestFetch:
             BattinfoSchema.from_ref(_REF)
         assert any(chosen.rglob("*"))
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_an_interrupted_fetch_leaves_no_partial_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """battinfo-schema: An interrupted fetch leaves no partial set.
 
@@ -172,7 +165,6 @@ class TestFetch:
             BattinfoSchema.from_ref(_REF)
         assert list(tmp_path.rglob("*")) == []
 
-    @pytest.mark.xfail(strict=True, reason="bdf.battinfo._fetch not implemented")
     def test_the_script_and_the_package_name_the_same_paths(self) -> None:
         """battinfo-schema: The script and the package name the same paths."""
         assert MANAGED_SCHEMA_PATHS == SCRIPT_MANAGED_SCHEMA_PATHS

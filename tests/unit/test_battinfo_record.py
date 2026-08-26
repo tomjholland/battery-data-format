@@ -18,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.update_battinfo import load_managed  # noqa: E402
 
-_PINNED_REF = "5ff1a6f2590795765978bd8088e2e6a8c5c146f3"
+_PINNED_REF = "0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88"
 _PINNED_SCHEMA_VERSION = "0.2.0"
 
 
