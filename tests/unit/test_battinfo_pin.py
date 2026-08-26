@@ -34,7 +34,6 @@ def _mock_get(bundle_text: str = _SCHEMA_VERSION_TEXT, init_text: str = _BATTINF
     return Mock(side_effect=_get)
 
 
-@pytest.mark.xfail(strict=True, reason="bdf.battinfo._pin not implemented")
 def test_an_update_stamps_both_versions_from_upstream() -> None:
     """battinfo-bundle-pin: An update stamps both versions from upstream.
 
@@ -50,7 +49,6 @@ def test_an_update_stamps_both_versions_from_upstream() -> None:
     assert pin["battinfo_version"] == "0.7.0"
 
 
-@pytest.mark.xfail(strict=True, reason="bdf.battinfo._pin not implemented")
 def test_the_stamped_schema_version_matches_the_semver_pattern() -> None:
     """The stamped schema version matches the pattern the bundled schemas
     enforce for `schema_version`."""
@@ -59,7 +57,6 @@ def test_the_stamped_schema_version_matches_the_semver_pattern() -> None:
     assert _SEMVER.match(pin["schema_version"])
 
 
-@pytest.mark.xfail(strict=True, reason="bdf.battinfo._pin not implemented")
 def test_an_update_refuses_an_unreadable_upstream_constant() -> None:
     """battinfo-bundle-pin: An update refuses an unreadable upstream constant.
 
@@ -76,7 +73,6 @@ def test_an_update_refuses_an_unreadable_upstream_constant() -> None:
     assert version_path.read_text(encoding="utf-8") == before
 
 
-@pytest.mark.xfail(strict=True, reason="bdf.battinfo._pin not implemented")
 def test_a_commit_after_the_newest_tag_still_stamps_a_version() -> None:
     """battinfo-bundle-pin: A commit after the newest tag still stamps a
     version.
