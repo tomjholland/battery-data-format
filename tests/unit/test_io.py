@@ -14,17 +14,13 @@ from polars.testing import assert_frame_equal, assert_series_equal
 from pydantic import ValidationError
 
 from bdf import (
-    BattinfoCellInstance,
-    BattinfoChannelInstance,
-    BattinfoEquipmentInstance,
-    BattinfoTest,
-    BattinfoTestProtocol,
     BDFMetadataError,
     BdfReadInfo,
     BDFValidationError,
     Metadata,
     io,
 )
+from bdf.battinfo.record import Record
 from bdf.io import read, scan
 from bdf.metadata_parsers import JsonRule, JsonSidecarParser, RegexRule, TxtPreambleParser
 from bdf.normalization import AbsoluteTimeNormalization
@@ -824,11 +820,11 @@ def test_read_returns_typed_metadata_with_five_records(tmp_path: Path) -> None:
     _, meta = io.read(p)
     assert isinstance(meta, Metadata)
     assert meta.bdf.source == "bdf_csv"
-    assert isinstance(meta.battinfo_test, BattinfoTest)
-    assert isinstance(meta.battinfo_cell, BattinfoCellInstance)
-    assert isinstance(meta.battinfo_channel, BattinfoChannelInstance)
-    assert isinstance(meta.battinfo_equipment, BattinfoEquipmentInstance)
-    assert isinstance(meta.battinfo_test_protocol, BattinfoTestProtocol)
+    assert isinstance(meta.battinfo_test, Record)
+    assert isinstance(meta.battinfo_cell, Record)
+    assert isinstance(meta.battinfo_channel, Record)
+    assert isinstance(meta.battinfo_equipment, Record)
+    assert isinstance(meta.battinfo_test_protocol, Record)
     assert meta.raw is None
     assert meta.extras is None
 
@@ -946,8 +942,12 @@ def test_reserved_sidecar_never_self_nests(tmp_path: Path) -> None:
         io.save(df, p, metadata=meta)
 
 
-def test_stated_null_on_a_wrapper_typed_leaf_roundtrips(tmp_path: Path) -> None:
-    """A curated null on a wrapper-typed leaf stays null through repeated save/read cycles."""
+def test_a_stated_null_on_a_choice_typed_leaf_reads_as_unset(tmp_path: Path) -> None:
+    """A curated null on a choice-typed leaf reads as unset, same as a leaf neither side ever stated.
+
+    A choice-typed leaf holds its value directly, so a stated null and
+    an absent leaf are the same `None`, and a re-save omits it either way.
+    """
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     p = tmp_path / "data.bdf.csv"
     io.save(df, p)
@@ -959,7 +959,7 @@ def test_stated_null_on_a_wrapper_typed_leaf_roundtrips(tmp_path: Path) -> None:
         assert meta.battinfo_equipment.equipment.commissioned_at is None  # type: ignore[union-attr]
         io.save(df, p, metadata=meta)
         payload = json.loads(sidecar.read_text())
-        assert payload["battinfo_equipment"]["equipment"]["commissioned_at"] is None
+        assert "battinfo_equipment" not in payload
         # a leaf neither side ever stated does not leak a matching bare null
         assert "expires_at" not in payload.get("battinfo_cell", {}).get("cell_instance", {})
 
