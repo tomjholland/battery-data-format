@@ -97,8 +97,8 @@ build the docs.
 ## BattINFO-derived content (do not edit by hand)
 
 [BattINFO](https://github.com/BIG-MAP/BattINFO) is the source of truth for the
-managed schema files under `src/bdf/data/battinfo/schemas/` (nine today). The model package
-`bdf.battinfo.generated` renders from those files alone, and
+managed schema files under `src/bdf/data/battinfo/schemas/` (nine today). The type stubs at
+`src/bdf/battinfo/records.pyi` render from those files alone, and
 `src/bdf/data/battinfo/VERSION` stamps the upstream commit they came from.
 
 - To change a schema, open a PR on the **BattINFO repo**, not here.
@@ -116,12 +116,13 @@ managed schema files under `src/bdf/data/battinfo/schemas/` (nine today). The mo
   jobs produce. Run it locally with `uv run --all-extras pytest -m freshness`.
 - To clear a red check, run `python scripts/update_battinfo.py main` and commit
   the result. The script fetches the managed files, stamps the commit that `main`
-  resolves to, and regenerates the model package. Review that diff: an upstream
-  rename can break a field path that `tests/unit/test_battinfo_contract.py`
-  pins.
-- Never edit `bdf/battinfo/generated/` directly. CI compares the committed
-  package against a fresh render (`datamodel-codegen --check`), and a hand
-  edit fails that check.
+  resolves to, and writes the stubs from the bundle it just fetched. Review
+  that diff: an upstream rename can break a field path that
+  `tests/unit/test_battinfo_contract.py` pins.
+- Never edit `src/bdf/battinfo/records.pyi` directly. Run
+  `python scripts/update_battinfo.py --check-stubs` to compare the committed
+  stubs against a fresh render from the bundled documents, with no network
+  call; a hand edit fails that check.
 
 ## Reference artifacts are byte-exact
 

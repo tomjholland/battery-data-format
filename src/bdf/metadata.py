@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
+    BaseModel,
+    ConfigDict,
     Field,
     ValidationInfo,
     field_validator,
     model_validator,
 )
 
-from bdf.battinfo._base import _RecordModel
 from bdf.battinfo.record import Record
 from bdf.battinfo.schema import BATTINFO_SCHEMA
 
@@ -95,6 +96,24 @@ def _root_record(doc_name: str, data: dict[str, Any] | None = None) -> Record:
     """
     node, base_id = _resolve_root(doc_name)
     return Record(BATTINFO_SCHEMA, node, base_id, data if data is not None else {}, path="")
+
+
+class _RecordModel(BaseModel):
+    """Shared configuration and serialisation for every BattINFO record model."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise this record to a plain dict in BattINFO shape.
+
+        Returns:
+            The model dumped in JSON mode with ``exclude_defaults=True``.
+            Every declared field's default is ``None`` or a factory that
+            builds an empty model, and each compares equal to its own
+            default by value, so a field left untouched, and a section
+            nothing filled, are both absent from the result.
+        """
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class BdfReadInfo(_RecordModel):
