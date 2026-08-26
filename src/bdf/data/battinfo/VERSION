@@ -1,2 +1,4 @@
 repo=BIG-MAP/BattINFO
 ref=0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88
+schema_version=0.2.0
+battinfo_version=0.7.0

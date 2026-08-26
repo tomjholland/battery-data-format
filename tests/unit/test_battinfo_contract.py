@@ -343,6 +343,13 @@ _MOCK_MANAGED_SCHEMA_CONTENT: dict[str, bytes] = {
     "modules/common/quantity.schema.json": b'{"title": "quantity schema", "properties": {}}',
 }
 
+# The two upstream source files the update reads one version constant from,
+# keyed by the pin key each constant stamps, mirroring bdf.battinfo._pin.
+_MOCK_PIN_CONTENT: dict[str, str] = {
+    "schema_version": 'SCHEMA_VERSION = "0.2.0"\n',
+    "battinfo_version": '__version__ = "0.7.0"\n',
+}
+
 
 def test_bundle_loads_the_managed_schemas_and_version_stamp() -> None:
     """The package-data loader reads the bundle under ``bdf/data/battinfo/``
@@ -365,15 +372,23 @@ def test_load_schema_reads_one_managed_file_and_rejects_any_other() -> None:
         load_schema("not-a-managed-file.schema.json")
 
 
-def _mock_fetch_responses(overrides: dict[str, bytes] | None = None) -> list[Mock]:
-    """Return one mocked HTTP response per managed schema file, in fetch order.
+def _mock_fetch_responses(overrides: dict[str, bytes] | None = None, *, pin: bool = False) -> list[Mock]:
+    """Return one mocked HTTP response per fetched file, in fetch order.
 
     Args:
         overrides: Content to serve instead of the default for the named files.
             Use it to stand in for an upstream edit.
+        pin: Serve the two upstream version-constant files first, because the
+            update reads them before it fetches the managed schema files.
     """
     overrides = overrides or {}
     responses = []
+    if pin:
+        for text in _MOCK_PIN_CONTENT.values():
+            constant_response = Mock()
+            constant_response.text = text
+            constant_response.raise_for_status = Mock()
+            responses.append(constant_response)
     for rel_name, content in _MOCK_MANAGED_SCHEMA_CONTENT.items():
         response = Mock()
         response.content = overrides.get(rel_name, content)
@@ -388,19 +403,20 @@ def _bundle_the_mock_schemas(tmp_path: Path) -> Path:
 
 
 def test_update_script_fetches_writes_and_stamps(tmp_path: Path) -> None:
-    """The update script fetches the eight managed schema files at a given ref
-    over a mocked transport (ontology-snapshot style), writes them atomically
-    under ``schemas/``, stamps ``VERSION`` with that ref, and regenerates the
-    model package (mocked here, covered on its own by
+    """The update script fetches the eight managed schema files and the two
+    upstream version constants at a given ref over a mocked transport
+    (ontology-snapshot style), writes the schema files atomically under
+    ``schemas/``, stamps ``VERSION`` with that ref and both versions, and
+    regenerates the model package (mocked here, covered on its own by
     ``tests/unit/test_battinfo_generated.py``)."""
     dest = tmp_path / "battinfo"
     ref = "deadbeef1234"
     with (
-        patch("requests.get", side_effect=_mock_fetch_responses()) as mock_get,
+        patch("requests.get", side_effect=_mock_fetch_responses(pin=True)) as mock_get,
         patch("scripts.update_battinfo.regenerate") as mock_regenerate,
     ):
         result = update(ref, dest=dest)
-        assert mock_get.call_count == len(_MOCK_MANAGED_SCHEMA_CONTENT)
+        assert mock_get.call_count == len(_MOCK_MANAGED_SCHEMA_CONTENT) + len(_MOCK_PIN_CONTENT)
 
     for call in mock_get.call_args_list:
         url = call.args[0] if call.args else call.kwargs.get("url")
@@ -413,6 +429,8 @@ def test_update_script_fetches_writes_and_stamps(tmp_path: Path) -> None:
 
     version_text = (dest / "VERSION").read_text(encoding="utf-8")
     assert f"ref={ref}" in version_text
+    assert "schema_version=0.2.0" in version_text
+    assert "battinfo_version=0.7.0" in version_text
 
     mock_regenerate.assert_called_once_with()
 

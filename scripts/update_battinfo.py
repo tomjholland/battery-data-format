@@ -6,8 +6,9 @@ Usage: ``python scripts/update_battinfo.py REF``
 
 ``REF`` is a commit, tag, or branch of ``BIG-MAP/BattINFO``. The script fetches
 the managed schema files at that ref, replaces the bundled copies
-atomically, stamps ``VERSION`` with the commit the ref resolves to, and
-regenerates ``bdf.battinfo.generated``. It writes each file in the canonical
+atomically, stamps ``VERSION`` with the commit the ref resolves to and the
+upstream version constants at it, and regenerates
+``bdf.battinfo.generated``. It writes each file in the canonical
 form ``normalize`` states, and not in the upstream byte layout, so an upstream
 commit that only reorders keys produces no diff.
 
@@ -41,7 +42,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from bdf.battinfo._pin import refresh
 
 _REPO = "BIG-MAP/BattINFO"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +156,8 @@ def load_version(source: Path | None = None) -> dict[str, str]:
             bundled :func:`bundle_dir`.
 
     Returns:
-        A mapping of stamp keys (``repo``, ``ref``) to their values.
+        A mapping of stamp keys (``repo``, ``ref``, ``schema_version``,
+        ``battinfo_version``) to their values.
 
     Raises:
         RuntimeError: The stamp is missing or unreadable.
@@ -292,8 +296,13 @@ def _atomic_write(dest_dir: Path, rel_name: str, content: bytes) -> None:
     tmp_path.replace(dest)
 
 
-def write_bundle(fetched: dict[str, bytes], ref: str, dest: Path | None = None) -> Path:
-    """Replace the bundled schema files and stamp ``VERSION`` with ``ref``.
+def write_bundle(
+    fetched: dict[str, bytes],
+    ref: str,
+    dest: Path | None = None,
+    pin: Mapping[str, str] | None = None,
+) -> Path:
+    """Replace the bundled schema files and stamp ``VERSION`` with the pin.
 
     Each schema file passes through :func:`normalize` first, so the bundle
     holds the upstream document and never the upstream byte layout.
@@ -303,17 +312,22 @@ def write_bundle(fetched: dict[str, bytes], ref: str, dest: Path | None = None) 
         ref: The upstream ref the files came from.
         dest: Bundle directory to write into. Defaults to the bundled
             package-data directory.
+        pin: The stamp to write, as :func:`bdf.battinfo._pin.refresh` returns
+            it. Defaults to the repository and ``ref`` alone.
 
     Returns:
         The bundle directory written to.
     """
     if dest is None:
         dest = bundle_dir()
+    if pin is None:
+        pin = {"repo": _REPO, "ref": ref}
     schemas = dest / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
     for rel_name, content in fetched.items():
         _atomic_write(schemas, rel_name, normalize(content))
-    _atomic_write(dest, "VERSION", f"repo=BIG-MAP/BattINFO\nref={ref}\n".encode())
+    stamp = "".join(f"{key}={value}\n" for key, value in pin.items())
+    _atomic_write(dest, "VERSION", stamp.encode())
     return dest
 
 
@@ -339,6 +353,9 @@ def regenerate() -> None:
 def update(ref: str, dest: Path | None = None) -> Path:
     """Fetch, stamp, and regenerate in one run.
 
+    The version constants come first, so an upstream constant that cannot be
+    read fails the run before it replaces any bundled file.
+
     Args:
         ref: Upstream ``BIG-MAP/BattINFO`` commit to pin. The caller resolves a
             branch or a tag first, because the stamp records a commit.
@@ -349,8 +366,13 @@ def update(ref: str, dest: Path | None = None) -> Path:
 
     Returns:
         The bundle directory written to.
+
+    Raises:
+        RuntimeError: An upstream version constant is absent or unparseable at
+            ``ref``.
     """
-    written = write_bundle(fetch_schemas(ref), ref, dest)
+    pin = refresh(ref)
+    written = write_bundle(fetch_schemas(ref), ref, dest, pin)
     regenerate()
     return written
 
