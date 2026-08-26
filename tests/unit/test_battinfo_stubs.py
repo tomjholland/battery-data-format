@@ -7,13 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MUTATED_SCHEMA_PATH = _REPO_ROOT / "src" / "bdf" / "data" / "battinfo" / "schemas" / "test.schema.json"
 
 
-@pytest.mark.xfail(strict=True, reason="bdf.battinfo.records stub not implemented")
 def test_a_type_checker_refuses_an_unknown_attribute(tmp_path: Path) -> None:
     """battinfo-records: A type checker refuses an unknown attribute."""
     probe = tmp_path / "probe.py"
@@ -33,7 +30,6 @@ def test_a_type_checker_refuses_an_unknown_attribute(tmp_path: Path) -> None:
     assert "totally_unknown_attribute" in result.stdout
 
 
-@pytest.mark.xfail(strict=True, reason="scripts.update_battinfo --check-stubs not implemented")
 def test_stale_stubs_fail_a_check() -> None:
     """battinfo-records: Stale stubs fail a check."""
     clean = subprocess.run(
@@ -63,7 +59,6 @@ def test_stale_stubs_fail_a_check() -> None:
     assert "records.pyi" in (stale.stdout + stale.stderr)
 
 
-@pytest.mark.xfail(strict=True, reason="src/bdf/battinfo/records.pyi not implemented")
 def test_the_stubs_stay_out_of_the_run_time() -> None:
     """battinfo-records: The stubs stay out of the run time."""
     stub_path = _REPO_ROOT / "src" / "bdf" / "battinfo" / "records.pyi"
