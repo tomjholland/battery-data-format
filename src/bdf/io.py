@@ -416,16 +416,16 @@ def _version_stamps() -> dict[str, str | None]:
 
     Returns:
         ``bdf_version`` (the installed package version), ``ontology_version``
-        (the pinned BDF ontology release), and ``battinfo_ref`` (the upstream
-        commit the bundled BattINFO schemas were fetched at).
+        (the pinned BDF ontology release), and ``battinfo_version`` (the
+        BattINFO release of the loaded schema set).
     """
     import bdf
-    from bdf.battinfo import bundled_ref
+    from bdf.battinfo import BATTINFO_SCHEMA
 
     return {
         "bdf_version": bdf.__version__,
         "ontology_version": COLUMN_ONTOLOGY.ontology_version or None,
-        "battinfo_ref": bundled_ref(),
+        "battinfo_version": BATTINFO_SCHEMA.version,
     }
 
 
@@ -433,7 +433,7 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
     """Write ``metadata`` to ``sidecar``, or delete the sidecar where it carries nothing.
 
     A written sidecar is stamped with the writer's versions (GH #106):
-    ``bdf.bdf_version``, ``bdf.ontology_version``, and ``bdf.battinfo_ref``.
+    ``bdf.bdf_version``, ``bdf.ontology_version``, and ``bdf.battinfo_version``.
     The stamps identify the file's writer, so they overwrite any stamps the
     caller's object carries, and a read-then-save records the version that
     performed the save. The caller's object is not modified. A ``Metadata``

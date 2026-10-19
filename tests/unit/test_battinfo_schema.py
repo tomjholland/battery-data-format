@@ -14,8 +14,8 @@ import pytest
 
 from bdf.battinfo.schema import BattinfoSchema, SchemaError, bundled_schema_dir, load_bundled, load_docs
 
-# The upstream commit `src/bdf/data/battinfo/VERSION` names.
-_PINNED_VERSION = "0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88"
+# The upstream release `src/bdf/data/battinfo/VERSION` names.
+_PINNED_VERSION = "0.8.0rc2"
 
 
 def _bundled_docs() -> dict[str, dict[str, Any]]:
@@ -56,7 +56,7 @@ class TestBundledSet:
     def test_import_loads_bundled_set(self) -> None:
         """battinfo-schema: An import loads the bundled set.
 
-        The loaded set reports the version the bundled ``VERSION`` names.
+        The loaded set reports the release the bundled ``VERSION`` names.
         """
         schema = load_bundled()
         assert schema.version == _PINNED_VERSION

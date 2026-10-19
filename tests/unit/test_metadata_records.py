@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from bdf.battinfo.record import Record, SchemaError
-from bdf.battinfo.schema import bundled_schema_dir, load_docs
+from bdf.battinfo.schema import MANAGED_SCHEMAS
 from bdf.metadata import _ENTITY_DOCS, BdfReadInfo, Metadata
 
 VALID_CELL_IRI = "https://w3id.org/battinfo/cell/abcd-efgh-jkmn-pqrs"
@@ -50,7 +50,7 @@ def test_every_entity_record_field_is_registered() -> None:
     and every registered document is one the bundle manages."""
     record_fields = {name for name in Metadata.model_fields if name.startswith("battinfo_")}
     assert set(_ENTITY_DOCS) == record_fields
-    assert set(_ENTITY_DOCS.values()) <= set(load_docs(bundled_schema_dir()))
+    assert set(_ENTITY_DOCS.values()) <= set(MANAGED_SCHEMAS)
 
 
 def test_fresh_read_metadata_auto_constructs_every_entity_record() -> None:

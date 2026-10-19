@@ -253,9 +253,9 @@ class BdfReadInfo(_RecordModel):
     that performed the save, not the one that wrote the file it read."""
     ontology_version: str | None = None
     """The BDF ontology release the writer's column spec was pinned to."""
-    battinfo_ref: str | None = None
-    """The upstream BattINFO commit the writer's bundled schemas were fetched
-    at (a release tag once upstream versions its schemas)."""
+    battinfo_version: str | None = None
+    """The BattINFO release of the schema set the writer's records were
+    bounded by."""
 
 
 class Metadata(_RecordModel):
@@ -273,10 +273,9 @@ class Metadata(_RecordModel):
 
     Every record field auto-constructs, so a caller assigns a leaf on a fresh
     instance with no ``None`` guard. A leaf reads as ``None`` while unfilled,
-    a choice-typed leaf (``Quantity.value``, ``expires_at``,
-    ``manufactured_at``, ``commissioned_at`` among them) holds its value
-    directly, and a field whose node declares its own fields returns a nested
-    record.
+    a choice-typed leaf (``expires_at``, ``manufactured_at``,
+    ``commissioned_at`` among them) holds its value directly, and a field
+    whose node declares its own fields returns a nested record.
     """
 
     # An upstream schema sets `additionalProperties: false` at its root, so

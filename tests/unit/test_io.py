@@ -846,7 +846,7 @@ def test_save_metadata(tmp_path: Path) -> None:
     metadata = json.loads(p_meta.read_text())
     assert metadata["bdf"]["source"] == "bdf_parquet"
     # every written sidecar also carries the writer's version stamps (GH #106)
-    assert set(metadata["bdf"]) == {"source", "bdf_version", "ontology_version", "battinfo_ref"}
+    assert set(metadata["bdf"]) == {"source", "bdf_version", "ontology_version", "battinfo_version"}
 
 
 def test_metadata_roundtrips_through_save_and_read(tmp_path: Path) -> None:
@@ -1372,7 +1372,7 @@ def test_table_parser_read_accepts_day_month_order(tmp_path: Path) -> None:
 
 
 def test_save_stamps_writer_versions_into_the_sidecar(tmp_path: Path) -> None:
-    """A written sidecar carries bdf_version, ontology_version, and battinfo_ref,
+    """A written sidecar carries bdf_version, ontology_version, and battinfo_version,
     and stamping never mutates the caller's object."""
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     meta = Metadata()
@@ -1382,12 +1382,12 @@ def test_save_stamps_writer_versions_into_the_sidecar(tmp_path: Path) -> None:
     io.save(df, p, metadata=meta)
 
     import bdf
-    from bdf.battinfo import bundled_ref
+    from bdf.battinfo import BATTINFO_SCHEMA
 
     doc = json.loads(p.with_suffix(".metadata.json").read_text(encoding="utf-8"))
     assert doc["bdf"]["bdf_version"] == bdf.__version__
     assert doc["bdf"]["ontology_version"]
-    assert doc["bdf"]["battinfo_ref"] == bundled_ref()
+    assert doc["bdf"]["battinfo_version"] == BATTINFO_SCHEMA.version == "0.8.0rc2"
     assert meta.bdf.bdf_version is None
 
 

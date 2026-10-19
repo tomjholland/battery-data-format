@@ -10,7 +10,7 @@ import pytest
 from bdf.battinfo.record import Record
 from bdf.battinfo.schema import BattinfoSchema, SchemaError, bundled_schema_dir, load_docs
 
-_PINNED_VERSION = "0b4dfd3fe70ccf2e6cc68e23aebb3fc8d9120c88"
+_PINNED_VERSION = "0.8.0rc2"
 
 
 def _bundled_docs() -> dict[str, dict[str, Any]]:
@@ -69,13 +69,17 @@ class TestAssignmentAndRead:
 
     def test_a_choice_typed_value_reads_directly(self) -> None:
         """battinfo-records: A choice-typed value reads directly."""
-        record = _quantity_record()
-        record.value = 5.0
-        assert record.value == 5.0
-        assert not isinstance(record.value, Record)
-        record.value = "five"
-        assert record.value == "five"
-        assert not isinstance(record.value, Record)
+        docs = _bundled_docs()
+        schema = BattinfoSchema(docs=docs, version=_PINNED_VERSION)
+        doc = docs["dataset.schema.json"]
+        resolved, resolved_id = schema.resolve(doc, doc["$id"])
+        dataset = Record(schema, resolved, resolved_id, data={}, path="").dataset
+        dataset.additional_type = "Dataset"
+        assert dataset.additional_type == "Dataset"
+        assert not isinstance(dataset.additional_type, Record)
+        dataset.additional_type = ["Dataset", "CreativeWork"]
+        assert dataset.additional_type == ["Dataset", "CreativeWork"]
+        assert not isinstance(dataset.additional_type, Record)
 
 
 class TestKeyPattern:
