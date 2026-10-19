@@ -4,17 +4,22 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Mapping, Optional, Union
 
-from pydantic import Field
+import jsonschema
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    GetJsonSchemaHandler,
+    TypeAdapter,
+    ValidationError,
+)
+from pydantic_core import CoreSchema, InitErrorDetails, PydanticCustomError, core_schema
 
-from bdf.battinfo._base import _RecordModel
-from bdf.battinfo.generated.cell_instance_schema import BattinfoCellInstance
-from bdf.battinfo.generated.channel_schema import BattinfoChannelInstance
-from bdf.battinfo.generated.dataset_schema import BattinfoDatasetSchemaOrgAligned
-from bdf.battinfo.generated.equipment_schema import BattinfoEquipmentInstance
-from bdf.battinfo.generated.test_protocol_schema import BattinfoTestProtocol
-from bdf.battinfo.generated.test_schema import BattinfoTest
+from bdf.battinfo.record import Record, _absolute_refs, _coerce
+from bdf.battinfo.schema import BATTINFO_SCHEMA
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -24,9 +29,216 @@ except Exception:  # pragma: no cover
 
 from bdf import spec
 
-# The generated root class carries the schema title verbatim; the short name
-# is the public one, matching the record field it types.
-BattinfoDataset = BattinfoDatasetSchemaOrgAligned
+# The one registry of BattINFO entity records: each `Metadata` field, and the
+# bundle-relative document its root record is bounded by. The field defaults,
+# the `EntityRecord` field markers, and the metadata targets all read this
+# mapping, so an entity is added here and declared once as a field.
+_ENTITY_DOCS: dict[str, str] = {
+    "battinfo_test": "test.schema.json",
+    "battinfo_cell": "cell-instance.schema.json",
+    "battinfo_channel": "channel.schema.json",
+    "battinfo_equipment": "equipment.schema.json",
+    "battinfo_test_protocol": "test-protocol.schema.json",
+    "battinfo_dataset": "dataset.schema.json",
+}
+
+
+# The root-node cache, and the `docs` mapping it was filled from. Holding
+# that mapping here keeps it alive, so its address cannot be reused for a
+# later substituted set while the cache still holds entries built from it;
+# an `id`-only comparison has no such guarantee once the mapping it named is
+# freed.
+_root_cache: dict[str, tuple[dict[str, Any], str]] = {}
+_root_cache_docs: dict[str, dict[str, Any]] | None = None
+
+
+def _resolve_root(doc_name: str) -> tuple[dict[str, Any], str]:
+    """Resolve one BattINFO entity's root schema node.
+
+    The root documents never change at runtime, so the result is
+    cached. A caller that substitutes `BATTINFO_SCHEMA` replaces its `docs`
+    mapping outright, so a fresh `docs` mapping (`is` compared against the
+    one the cache was filled from) clears the cache before it resolves.
+
+    Args:
+        doc_name: The bundle-relative document naming the entity's root node.
+
+    Returns:
+        The resolved root node, and the `$id` it resolved against.
+    """
+    global _root_cache_docs
+    if BATTINFO_SCHEMA.docs is not _root_cache_docs:
+        _root_cache.clear()
+        _root_cache_docs = BATTINFO_SCHEMA.docs
+    cached = _root_cache.get(doc_name)
+    if cached is None:
+        doc = BATTINFO_SCHEMA.docs[doc_name]
+        cached = BATTINFO_SCHEMA.resolve(doc, doc["$id"])
+        _root_cache[doc_name] = cached
+    return cached
+
+
+def _root_record(doc_name: str, data: dict[str, Any] | None = None) -> Record:
+    """Build a `Record` bounded by one BattINFO entity's root schema node.
+
+    Args:
+        doc_name: The bundle-relative document naming the entity's root node.
+        data: The backing dictionary the record reads and writes, or an
+            empty one where nothing was set.
+
+    Returns:
+        A record bounded by the document's root node, over `data`.
+    """
+    node, base_id = _resolve_root(doc_name)
+    return Record(BATTINFO_SCHEMA, node, base_id, data if data is not None else {}, path="")
+
+
+def _entity_field(name: str) -> Any:
+    """Declare one entity record field, bounded by the document `_ENTITY_DOCS` names for it.
+
+    Args:
+        name: The field's own name, a key of `_ENTITY_DOCS`.
+
+    Returns:
+        The pydantic field declaration, defaulting to an empty record.
+    """
+    doc_name = _ENTITY_DOCS[name]
+    return Field(default_factory=lambda: _root_record(doc_name))
+
+
+_MAPPING: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
+"""Checks that a value passed for an entity record field is a mapping."""
+
+
+@dataclass(frozen=True)
+class EntityRecord:
+    """Pydantic field marker: the field holds a `Record` bounded by one entity's root node.
+
+    The marker gives the field its pydantic behaviour, in python and in JSON
+    mode alike. A mapping is coerced (see :mod:`bdf.battinfo.record`),
+    validated against the loaded schema, and built into a record; a record
+    passes through once it validates. Every refused value is its own
+    validation error, located at the value (``battinfo_test.test.started_at``).
+    A record serialises through `Record.to_dict`, and the field's JSON Schema
+    is the loaded BattINFO root node.
+
+    Args:
+        name: The field's own name, a key of `_ENTITY_DOCS`.
+    """
+
+    name: str
+
+    def _refuse(self, data: dict[str, Any]) -> None:
+        """Raise one validation error per value the loaded schema refuses.
+
+        Args:
+            data: The record's data. A stated null is unset rather than
+                refused, so the pruned form is what validates.
+
+        Raises:
+            ValidationError: The loaded schema refuses a value.
+        """
+        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
+        validator = jsonschema.Draft202012Validator(_absolute_refs(node, base_id), registry=BATTINFO_SCHEMA._registry)
+        version = BATTINFO_SCHEMA.version or "unversioned"
+        errors = [
+            InitErrorDetails(
+                type=PydanticCustomError(
+                    "battinfo_schema",
+                    "BattINFO schema {version} refuses this value: {reason}",
+                    {"version": version, "reason": error.message},
+                ),
+                loc=tuple(error.absolute_path),
+                input=error.instance,
+            )
+            for error in validator.iter_errors(data)
+        ]
+        if errors:
+            raise ValidationError.from_exception_data(self.name, errors)
+
+    def _build(self, value: Mapping[str, Any]) -> Record:
+        """Coerce and validate a mapping, and build the field's record over it.
+
+        Args:
+            value: A mapping in the entity's own BattINFO shape.
+
+        Returns:
+            A record bounded by the field's entity, over the coerced copy.
+        """
+        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
+        data = _coerce(BATTINFO_SCHEMA, node, base_id, dict(value))
+        record = _root_record(_ENTITY_DOCS[self.name], data)
+        self._refuse(record.to_dict())
+        return record
+
+    def _accept(self, value: Any) -> Record:
+        """Accept a record once it validates, or build one from a mapping.
+
+        Args:
+            value: A `Record`, or a mapping in the entity's own BattINFO shape.
+
+        Returns:
+            The record.
+        """
+        if isinstance(value, Record):
+            self._refuse(value.to_dict())
+            return value
+        return self._build(_MAPPING.validate_python(value))
+
+    def __get_pydantic_core_schema__(self, source: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        """Give the field its validator and its serialiser.
+
+        Args:
+            source: The annotated type, `Record`.
+            handler: Callback that builds the schema for a nested type.
+
+        Returns:
+            A core schema that builds the record from a mapping (or a JSON
+            object), and serialises it through `Record.to_dict`.
+        """
+        return core_schema.json_or_python_schema(
+            json_schema=core_schema.chain_schema(
+                [core_schema.dict_schema(), core_schema.no_info_plain_validator_function(self._build)]
+            ),
+            python_schema=core_schema.no_info_plain_validator_function(self._accept),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda record: record.to_dict(),
+                return_schema=core_schema.dict_schema(),
+                when_used="always",
+            ),
+        )
+
+    def __get_pydantic_json_schema__(self, schema: CoreSchema, handler: GetJsonSchemaHandler) -> dict[str, Any]:
+        """Describe the field by the loaded BattINFO schema's own root node.
+
+        Args:
+            schema: The field's core schema.
+            handler: Callback that builds the JSON Schema for a nested type.
+
+        Returns:
+            The entity's resolved root node, with every reference absolute.
+        """
+        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
+        described: dict[str, Any] = _absolute_refs(node, base_id)
+        return described
+
+
+class _RecordModel(BaseModel):
+    """Shared configuration and serialisation for every BattINFO record model."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise this record to a plain dict in BattINFO shape.
+
+        Returns:
+            The model dumped in JSON mode with ``exclude_defaults=True``.
+            Every declared field's default is ``None`` or a factory that
+            builds an empty model, and each compares equal to its own
+            default by value, so a field left untouched, and a section
+            nothing filled, are both absent from the result.
+        """
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class BdfReadInfo(_RecordModel):
@@ -51,8 +263,8 @@ class Metadata(_RecordModel):
     read audit section, the verbatim source a parser read, and the values a
     rule staged deliberately.
 
-    Each record is the generated root model of one BattINFO entity
-    (:mod:`bdf.battinfo.generated`), and the nesting and property names are
+    Each record is bounded by the loaded BattINFO schema
+    (:mod:`bdf.battinfo.schema`), and the nesting and property names are
     BattINFO's own (``meta.battinfo_test.test.instrument_name``, not a
     flattened facade), so a caller who already speaks BattINFO finds nothing
     to translate. A plugin fills only the fields it can derive, and every
@@ -60,29 +272,30 @@ class Metadata(_RecordModel):
     this same shape.
 
     Every record field auto-constructs, so a caller assigns a leaf on a fresh
-    instance with no ``None`` guard. A leaf of a plain scalar type reads as
-    ``None`` while unfilled. A field whose type is a model does not: it
-    defaults to an empty instance of that model, which covers each nested
-    section and the wrapper-typed leaves ``expires_at``, ``manufactured_at``,
-    ``commissioned_at``, and ``Quantity.value``. Read ``.root`` on a wrapper
-    to reach the value it holds.
+    instance with no ``None`` guard. A leaf reads as ``None`` while unfilled,
+    a choice-typed leaf (``Quantity.value``, ``expires_at``,
+    ``manufactured_at``, ``commissioned_at`` among them) holds its value
+    directly, and a field whose node declares its own fields returns a nested
+    record.
     """
 
     # An upstream schema sets `additionalProperties: false` at its root, so
     # `bdf`, `raw`, and `extras` cannot live inside a record. Each wrapper key
     # joins `battinfo_` to the upstream entity type, which also keeps a
     # sidecar document distinct from a record document.
-    battinfo_test: BattinfoTest = Field(default_factory=BattinfoTest)
+    battinfo_test: Annotated[Record, EntityRecord("battinfo_test")] = _entity_field("battinfo_test")
     """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
-    battinfo_cell: BattinfoCellInstance = Field(default_factory=BattinfoCellInstance)
+    battinfo_cell: Annotated[Record, EntityRecord("battinfo_cell")] = _entity_field("battinfo_cell")
     """The physical cell the test ran on, and the cell type it derives from."""
-    battinfo_channel: BattinfoChannelInstance = Field(default_factory=BattinfoChannelInstance)
+    battinfo_channel: Annotated[Record, EntityRecord("battinfo_channel")] = _entity_field("battinfo_channel")
     """The one channel of the equipment unit that ran the test."""
-    battinfo_equipment: BattinfoEquipmentInstance = Field(default_factory=BattinfoEquipmentInstance)
+    battinfo_equipment: Annotated[Record, EntityRecord("battinfo_equipment")] = _entity_field("battinfo_equipment")
     """The physical equipment unit that ran the test, a named cycler for example."""
-    battinfo_test_protocol: BattinfoTestProtocol = Field(default_factory=BattinfoTestProtocol)
+    battinfo_test_protocol: Annotated[Record, EntityRecord("battinfo_test_protocol")] = _entity_field(
+        "battinfo_test_protocol"
+    )
     """The reusable protocol the test followed: its typed steps, and links to the files that state them."""
-    battinfo_dataset: BattinfoDataset = Field(default_factory=BattinfoDataset)
+    battinfo_dataset: Annotated[Record, EntityRecord("battinfo_dataset")] = _entity_field("battinfo_dataset")
     """The dataset this file belongs to: its distributions (raw and processed files,
     checksums, formats), identifiers, and links to the cell and test that produced it.
     Mirrors a pre-1.0 upstream schema and may evolve with it. Nothing fills this
