@@ -41,9 +41,9 @@ this page is the map for contributors.
 ## Metadata
 
 Metadata follows the same shape as the table pipeline. BattINFO JSON schemas
-(bundled under `src/bdf/data/battinfo/`, refreshed from upstream by
-`scripts/update_battinfo.py`) bound the `Metadata` records at run time, and a
-user can load another set in place. `read()` returns a
+(a snapshot of one upstream release under `src/bdf/data/battinfo/`, refreshed
+by `bdf-update-battinfo`) bound the `Metadata` records at run time, and a user
+can load another release in place. `read()` returns a
 typed `Metadata` object assembled from exactly one source: the artifact's
 `.metadata.json` sidecar when present, the vendor file's own metadata
 otherwise. `save()` writes the sidecar and refuses ambiguous overwrites, so a

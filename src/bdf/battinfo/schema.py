@@ -5,12 +5,21 @@ record is never invalid, and a whole-record validation reports refused
 values alone. :meth:`BattinfoSchema.resolve` follows a ``$ref`` chain and
 combines ``allOf``, ``anyOf``, and ``oneOf`` into one node, so a caller reaches
 a field through a plain attribute walk rather than through a reference chase.
+
+The bundled set, under ``bdf/data/battinfo/``, is a snapshot of one upstream
+BattINFO release, as the bundled ontology is a snapshot of one ontology
+release: ``schemas/`` holds the documents, and ``VERSION`` names the release.
+:meth:`BattinfoSchema.get_snapshot` fetches a release and writes it in that
+layout, to the bundle or to the cache :meth:`BattinfoSchema.load_version`
+reads.
 """
 
 from __future__ import annotations
 
 import importlib.resources
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urljoin
@@ -18,6 +27,22 @@ from urllib.parse import urljoin
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
+
+MANAGED_SCHEMAS = (
+    "test.schema.json",
+    "cell-instance.schema.json",
+    "cell-canonical.schema.json",
+    "channel.schema.json",
+    "equipment.schema.json",
+    "test-protocol.schema.json",
+    "dataset.schema.json",
+    "modules/common/quantitative-properties.schema.json",
+    "modules/common/quantity.schema.json",
+)
+"""The schema documents a snapshot holds, by path under upstream ``assets/schemas/``."""
+
+_RELEASE_URL_TMPL = "https://raw.githubusercontent.com/BIG-MAP/BattINFO/v{version}/assets/schemas/{path}"
+"""The raw upstream URL of one schema document at one release tag."""
 
 MAX_REFERENCE_LINKS = 20
 """How many ``$ref`` links one resolution follows before it refuses the chain."""
@@ -113,8 +138,8 @@ class BattinfoSchema:
         docs: Mapping from each document's bundle-relative file name (for
             example ``"cell-instance.schema.json"``) to its parsed JSON
             Schema content.
-        version: The upstream BattINFO version the set is a snapshot of, or
-            ``None`` for a set of no version.
+        version: The upstream BattINFO release the set is a snapshot of (for
+            example ``"0.8.0rc2"``), or ``None`` for a set of no release.
     """
 
     version: str | None
@@ -278,10 +303,85 @@ class BattinfoSchema:
         self.docs = other.docs
         self._registry = other._registry
 
+    @classmethod
+    def from_snapshot(cls, path: Path | str) -> "BattinfoSchema":
+        """Load a snapshot directory: the documents under ``schemas/``, and the release ``VERSION`` names.
+
+        Args:
+            path: The snapshot directory, as :meth:`get_snapshot` writes it.
+
+        Returns:
+            The loaded set.
+
+        Raises:
+            SchemaError: The directory is missing, or a document does not parse.
+            ValueError: A document declares no ``$id``.
+        """
+        root = Path(path)
+        try:
+            version = (root / "VERSION").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            version = None
+        return cls(load_docs(root / "schemas"), version=version)
+
+    @classmethod
+    def get_snapshot(cls, version: str, dest: Path | str | None = None) -> Path:
+        """Fetch one upstream BattINFO release and write it as a snapshot.
+
+        Each document is written with sorted keys and a two-space indent, the
+        form the ``pretty-format-json`` pre-commit hook keeps, so a release
+        that only reorders keys changes no bundled byte. The snapshot is
+        written to a temporary directory and moved into place, so a failed
+        fetch leaves the destination as it was.
+
+        Args:
+            version: The release to fetch, e.g. ``"0.8.0rc2"``. A leading
+                ``v``, as the upstream tag carries, is accepted.
+            dest: The snapshot directory to write. Defaults to the bundled
+                package-data directory.
+
+        Returns:
+            The snapshot directory written to.
+
+        Raises:
+            requests.HTTPError: A fetch failed, as it does for a version
+                upstream has not released.
+            SchemaError: A fetched document does not parse.
+        """
+        import requests
+
+        version = version.removeprefix("v")
+        dest = bundled_snapshot_dir() if dest is None else Path(dest)
+        documents: dict[str, bytes] = {}
+        for name in MANAGED_SCHEMAS:
+            url = _RELEASE_URL_TMPL.format(version=version, path=name)
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            try:
+                doc = json.loads(response.content)
+            except json.JSONDecodeError as exc:
+                raise SchemaError(f"BattINFO document {name} from {url} is not valid JSON: {exc}") from exc
+            documents[name] = (json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode()
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f".{dest.name}."))
+        try:
+            for name, content in documents.items():
+                (staging / "schemas" / name).parent.mkdir(parents=True, exist_ok=True)
+                (staging / "schemas" / name).write_bytes(content)
+            (staging / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            staging.replace(dest)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return dest
+
     def load_dir(self, source: Path | str) -> None:
         """Load a schema set from a directory, and adopt it in place.
 
-        The adopted set names no version.
+        The adopted set names no release.
 
         Args:
             source: Directory holding the schema documents to adopt.
@@ -292,46 +392,69 @@ class BattinfoSchema:
         """
         self._adopt(BattinfoSchema(load_docs(source)))
 
+    def load_version(self, version: str, *, refresh: bool = False) -> None:
+        """Load one upstream BattINFO release, fetching it if not cached, and adopt it in place.
+
+        A fetched release is cached under ``BDF_CACHE_DIR``, in the layout
+        :meth:`get_snapshot` writes.
+
+        Args:
+            version: The release to load, e.g. ``"0.8.0rc2"``. A leading ``v``
+                is accepted.
+            refresh: If True, ignore the cache and re-fetch the release.
+
+        Raises:
+            requests.HTTPError: A fetch failed, as it does for a version
+                upstream has not released.
+            SchemaError: A document does not parse.
+        """
+        from bdf.fetch import cache_dir
+
+        cached = cache_dir() / f"battinfo-v{version.removeprefix('v')}"
+        if refresh or not (cached / "VERSION").is_file():
+            self.get_snapshot(version, dest=cached)
+        self._adopt(self.from_snapshot(cached))
+
+
+def bundled_snapshot_dir() -> Path:
+    """Return the package-data directory holding the bundled snapshot.
+
+    Returns:
+        The directory holding ``schemas/`` and the ``VERSION`` file.
+    """
+    return Path(str(importlib.resources.files("bdf.data").joinpath("battinfo")))
+
 
 def bundled_schema_dir() -> Path:
     """Return the package-data directory holding the bundled schema documents.
 
     Returns:
-        The directory ``load_bundled`` reads.
+        The ``schemas/`` directory of :func:`bundled_snapshot_dir`.
     """
-    return Path(str(importlib.resources.files("bdf.data").joinpath("battinfo").joinpath("schemas")))
-
-
-def bundled_ref() -> str | None:
-    """Return the upstream BattINFO commit the bundled schemas were fetched at.
-
-    Reads the ``ref`` line of ``bdf/data/battinfo/VERSION``. Upstream publishes
-    no schema version numbers yet, so the ref is a commit hash; when BattINFO
-    starts cutting versioned schema releases, this becomes a release tag.
-
-    Returns:
-        The ref string, or None when the stamp is missing or unreadable.
-    """
-    try:
-        text = (
-            importlib.resources.files("bdf.data").joinpath("battinfo").joinpath("VERSION").read_text(encoding="utf-8")
-        )
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line.startswith("ref="):
-            return line.removeprefix("ref=").strip() or None
-    return None
+    return bundled_snapshot_dir() / "schemas"
 
 
 def load_bundled() -> BattinfoSchema:
     """Load the bundled BattINFO schema set, with no network access.
 
     Returns:
-        The bundled set, named by the commit ``src/bdf/data/battinfo/VERSION``
-        stamps.
+        The bundled set, named by the release ``src/bdf/data/battinfo/VERSION``
+        holds.
     """
-    return BattinfoSchema(load_docs(bundled_schema_dir()), version=bundled_ref())
+    return BattinfoSchema.from_snapshot(bundled_snapshot_dir())
+
+
+def _update_snapshot_cli() -> None:
+    """Entry point: fetch a BattINFO release and update the bundled snapshot.
+
+    Usage: bdf-update-battinfo VERSION
+    """
+    import sys
+
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: bdf-update-battinfo VERSION (an upstream BattINFO release, e.g. 0.8.0)")
+    path = BattinfoSchema.get_snapshot(sys.argv[1])
+    print(f"BattINFO snapshot updated: {path} (release {sys.argv[1].removeprefix('v')})")
 
 
 BATTINFO_SCHEMA: BattinfoSchema = load_bundled()
