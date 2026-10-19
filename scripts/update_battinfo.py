@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""Refresh the bundled BattINFO schemas and regenerate the model package.
+"""Refresh the bundled BattINFO schemas.
 
 Usage: ``python scripts/update_battinfo.py REF``
        ``python scripts/update_battinfo.py --check [REF]``
 
 ``REF`` is a commit, tag, or branch of ``BIG-MAP/BattINFO``. The script fetches
 the managed schema files at that ref, replaces the bundled copies
-atomically, stamps ``VERSION`` with the commit the ref resolves to, and
-regenerates ``bdf.battinfo.generated``. It writes each file in the canonical
-form ``normalize`` states, and not in the upstream byte layout, so an upstream
-commit that only reorders keys produces no diff.
+atomically, and stamps ``VERSION`` with the commit the ref resolves to. It
+writes each file in the canonical form ``normalize`` states, and not in the
+upstream byte layout, so an upstream commit that only reorders keys produces
+no diff.
 
 ``--check`` compares alone, and it exits non-zero when the bundle is stale. It
 fetches the managed files at ``REF`` (``main`` by default) and reports which ones
@@ -24,10 +24,6 @@ five entity schemas (``test``, ``cell-instance``, ``channel``, ``equipment``,
 two shared ``modules/common`` files ``channel`` and ``equipment`` depend on.
 ``bdf/data/battinfo/VERSION`` stamps the ref they came from.
 
-The regeneration is ``datamodel-codegen`` with no arguments: the whole render
-is declared under ``[tool.datamodel-codegen]`` in ``pyproject.toml``, and CI
-verifies the committed package with ``datamodel-codegen --check``.
-
 Nothing in ``bdf`` imports this module. The schema files ship as package data
 for a reader that wants them, and the loaders here serve the contract tests.
 """
@@ -37,14 +33,12 @@ from __future__ import annotations
 import argparse
 import importlib.resources
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 _REPO = "BIG-MAP/BattINFO"
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Upstream paths (within BIG-MAP/BattINFO) for the managed schema files,
 # keyed by their path relative to the bundled schema directory.
@@ -86,7 +80,7 @@ def schema_dir() -> Path:
     """Return the directory holding the managed schema files.
 
     Returns:
-        The generator's input directory, which holds schema files alone.
+        The directory holding the managed schema files alone.
     """
     return bundle_dir() / "schemas"
 
@@ -317,42 +311,19 @@ def write_bundle(fetched: dict[str, bytes], ref: str, dest: Path | None = None) 
     return dest
 
 
-def regenerate() -> None:
-    """Regenerate ``bdf.battinfo.generated`` from the bundled schema files.
-
-    Runs in the repository root, because the generator reads
-    ``[tool.datamodel-codegen]`` from the working directory and that section
-    states the input and output paths relative to it.
-
-    Raises:
-        subprocess.CalledProcessError: The generator exited non-zero.
-    """
-    subprocess.run(
-        [sys.executable, "-m", "datamodel_code_generator"],
-        cwd=_REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
 def update(ref: str, dest: Path | None = None) -> Path:
-    """Fetch, stamp, and regenerate in one run.
+    """Fetch and stamp in one run.
 
     Args:
         ref: Upstream ``BIG-MAP/BattINFO`` commit to pin. The caller resolves a
             branch or a tag first, because the stamp records a commit.
         dest: Bundle directory to write into. Defaults to the bundled
-            package-data directory. The regeneration always reads the
-            directory the generator configuration names, whatever ``dest``
-            states.
+            package-data directory.
 
     Returns:
         The bundle directory written to.
     """
-    written = write_bundle(fetch_schemas(ref), ref, dest)
-    regenerate()
-    return written
+    return write_bundle(fetch_schemas(ref), ref, dest)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -373,7 +344,7 @@ def main(argv: list[str] | None = None) -> None:
     Raises:
         SystemExit: ``--check`` found a managed schema file that differs from
             the bundle. CI reads that exit code, matching ``--check`` on
-            ``datamodel-codegen`` and on ``scripts/generate_docs.py``.
+            ``scripts/generate_docs.py``.
     """
     parser = argparse.ArgumentParser(description="Refresh or check the bundled BattINFO schemas.")
     parser.add_argument(
