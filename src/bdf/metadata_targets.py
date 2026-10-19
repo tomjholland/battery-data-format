@@ -4,9 +4,10 @@ A target is a frozen reference to one path in the document a read returns
 (:class:`bdf.metadata.Metadata`). :data:`METADATA` mirrors that document as an
 attribute path: ``METADATA.battinfo_test.test.started_at`` is a reference to
 that field, and ``METADATA.extras["rig_bay"]`` is a reference to an ``extras``
-key. Attribute access reads ``model_fields`` on the generated BattINFO models
-themselves, so the models stay the single source of truth and no second
-representation of the same tree can go stale.
+key. Attribute access resolves against the loaded BattINFO schema
+(:data:`bdf.battinfo.schema.BATTINFO_SCHEMA`) itself, so the schema stays the
+single source of truth and no second representation of the same tree can go
+stale.
 
 An open map (e.g. ``test.conditions``) accepts a subscript instead of a
 further attribute. A misspelled attribute raises ``AttributeError`` before any
@@ -16,17 +17,12 @@ which a read stamps itself.
 
 from __future__ import annotations
 
-import typing
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic import BaseModel, ConfigDict
 
-from .battinfo.generated.cell_instance_schema import BattinfoCellInstance
-from .battinfo.generated.channel_schema import BattinfoChannelInstance
-from .battinfo.generated.dataset_schema import BattinfoDatasetSchemaOrgAligned
-from .battinfo.generated.equipment_schema import BattinfoEquipmentInstance
-from .battinfo.generated.test_protocol_schema import BattinfoTestProtocol
-from .battinfo.generated.test_schema import BattinfoTest
+from bdf.battinfo.schema import BATTINFO_SCHEMA
+from bdf.metadata import _ENTITY_DOCS, _resolve_root
 
 
 class MetadataTarget(BaseModel):
@@ -81,39 +77,8 @@ class ExtrasTarget(BaseModel):
         node[self.path[-1]] = value
 
 
-# The wrapper key each entity's root model answers to, matching the record
-# fields of the read metadata. `bdf`, `raw`, and `extras` are not entity
-# records and hold no target: only an explicit `extras` subscript reaches
-# outside an entity.
-_ROOTS: dict[str, type[BaseModel]] = {
-    "battinfo_test": BattinfoTest,
-    "battinfo_cell": BattinfoCellInstance,
-    "battinfo_channel": BattinfoChannelInstance,
-    "battinfo_equipment": BattinfoEquipmentInstance,
-    "battinfo_test_protocol": BattinfoTestProtocol,
-    "battinfo_dataset": BattinfoDatasetSchemaOrgAligned,
-}
-
-_ARRAY_ORIGINS = (list, tuple, set, frozenset)
-
-
-def _sole_type(annotation: Any) -> Any:
-    """Return the one type ``annotation`` states, or ``annotation`` itself.
-
-    Args:
-        annotation: A generated model field's type annotation.
-
-    Returns:
-        The single non-``None`` member of an optional or union annotation,
-        or ``annotation`` unchanged where it states no union or states more
-        than one member.
-    """
-    members = [member for member in typing.get_args(annotation) if member is not type(None)]
-    return members[0] if len(members) == 1 else annotation
-
-
 class _OpenMapTarget:
-    """A generated attribute node that accepts a subscript, not a further attribute."""
+    """A schema node that accepts a subscript, not a further attribute."""
 
     __slots__ = ("_path",)
 
@@ -150,16 +115,17 @@ class _ExtrasNamespace:
 
 
 class _MetadataNode:
-    """One node of the metadata target namespace, backed by a generated model."""
+    """One node of the metadata target namespace, backed by a resolved schema node."""
 
-    __slots__ = ("_path", "_model")
+    __slots__ = ("_path", "_node", "_base_id")
 
-    def __init__(self, path: tuple[str, ...], model: type[BaseModel]) -> None:
+    def __init__(self, path: tuple[str, ...], node: dict[str, Any], base_id: str) -> None:
         self._path = path
-        self._model = model
+        self._node = node
+        self._base_id = base_id
 
     def __getattr__(self, name: str) -> Any:
-        """Resolve ``name`` against this node's model fields.
+        """Resolve ``name`` against this node's declared fields.
 
         Args:
             name: The attribute segment to resolve.
@@ -169,24 +135,23 @@ class _MetadataNode:
             nested :class:`_MetadataNode`.
 
         Raises:
-            AttributeError: ``name`` names no field of this node's model, or
-                names an array-typed field, which is never a rule target.
+            AttributeError: ``name`` names no field of this node, or names an
+                array-typed field, which is never a rule target.
         """
-        field = self._model.model_fields.get(name)
         path = (*self._path, name)
-        if field is None:
+        declared = self._node.get("properties", {})
+        if name not in declared:
             raise AttributeError(f"{'.'.join(path)!r} is not a declared BattINFO metadata path")
 
         # One segment per access, so a self-referencing schema costs nothing
         # until a caller walks into it.
-        annotation = _sole_type(field.annotation)
-        origin = typing.get_origin(annotation)
-        if origin is dict:
-            return _OpenMapTarget(path)
-        if origin in _ARRAY_ORIGINS:
+        resolved, base_id = BATTINFO_SCHEMA.resolve(declared[name], self._base_id)
+        if resolved.get("type") == "array":
             raise AttributeError(f"{'.'.join(path)!r} is an array field, which states no metadata target")
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel) and not issubclass(annotation, RootModel):
-            return _MetadataNode(path, annotation)
+        if "properties" in resolved:
+            return _MetadataNode(path, resolved, base_id)
+        if "patternProperties" in resolved:
+            return _OpenMapTarget(path)
         return MetadataTarget(path=path)
 
 
@@ -203,17 +168,18 @@ class _MetadataRoot:
 
         Returns:
             An :class:`_ExtrasNamespace` for ``"extras"``, otherwise the
-            :class:`_MetadataNode` for that entity record.
+            :class:`_MetadataNode` for that entity record's root node.
 
         Raises:
             AttributeError: ``name`` names no entity record.
         """
         if name == "extras":
             return _ExtrasNamespace()
-        model = _ROOTS.get(name)
-        if model is None:
+        doc_name = _ENTITY_DOCS.get(name)
+        if doc_name is None:
             raise AttributeError(f"{name!r} is not a declared BattINFO metadata record")
-        return _MetadataNode((name,), model)
+        node, base_id = _resolve_root(doc_name)
+        return _MetadataNode((name,), node, base_id)
 
 
 METADATA = _MetadataRoot()
