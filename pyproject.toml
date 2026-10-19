@@ -36,6 +36,8 @@ dependencies = [
   "platformdirs>=4.10.0",
   "polars>=1.41.2",
   "babel>=2.15",
+  "jsonschema>=4.23",
+  "referencing>=0.35",
 ]
 
 [project.urls]
