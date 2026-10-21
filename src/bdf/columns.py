@@ -1,32 +1,24 @@
 """Ask for any BDF column by name, whether or not the data records it.
 
-A request names a BDF quantity in either style, optionally in a unit other
-than its canonical one:
+A request names a BDF quantity by its preferred label or its machine-readable
+name:
 
-- preferred label: ``"Voltage / V"``, ``"Voltage / mV"``, ``"Net Capacity / mAh"``
-- machine-readable name: ``"voltage_volt"``, ``"voltage_mV"``, ``"net_capacity_mah"``
+- preferred label: ``"Voltage / V"``, or in another unit, ``"Voltage / mV"``
+- machine-readable name: ``"voltage_volt"``, always in the canonical unit
 
 Resolution tries, in order: a column of that exact name; a recorded column of
-the same quantity, in any unit and either label style; then the recipes in
-:data:`bdf.recipes.RECIPES`, preferring a recipe whose inputs are all recorded
-over one that needs inputs derived first. The result is converted to the
-requested unit.
+the same quantity; then the recipes in :data:`bdf.recipes.RECIPES`, preferring
+a recipe whose inputs are all recorded over one that needs inputs derived
+first.
 
-Unit conversion only happens when the request names a unit. On a
-machine-readable name the unit follows the quantity's stem (the name without
-its canonical unit suffix) and is any of:
-
-- the canonical suffix itself: ``voltage_volt``, ``net_capacity_ah``
-- a case-sensitive unit symbol pint or UCUM understands: ``voltage_mV``,
-  ``test_time_h``, ``ambient_temperature_K``, ``applied_pressure_MPa``
-- a pint long unit name: ``voltage_millivolt``, ``test_time_hour``
-- a lowercase SI prefix on the canonical suffix: ``net_capacity_mah``,
-  ``net_energy_kwh``, ``applied_pressure_kpa``
-
-Symbols are case-sensitive because SI prefixes are (``mW`` is milliwatt,
-``MW`` megawatt), and because lowercase symbols collide with other units in
-pint (``ma`` is a milliyear, ``ah`` an attohour). Each unit is checked against
-the quantity's dimension, so such a collision raises instead of converting.
+Units convert only through preferred labels, and only when the label names a
+unit other than the canonical one: ``"Voltage / mV"`` converts, ``"Voltage /
+V"`` and ``"voltage_volt"`` do not. Machine-readable names are the ontology's
+fixed identifiers, so ``"voltage_mV"`` is not a BDF name and raises. A
+recorded column in a non-canonical unit (``"Voltage / mV"`` in the data) is
+converted to the canonical unit before any recipe uses it. All conversions go
+through :meth:`bdf.spec.Quantity.convert_to` and
+:meth:`~bdf.spec.Quantity.convert_from`.
 
 :func:`resolve` works from column names alone and returns Polars expressions,
 so it serves any frame type. :func:`select` and :func:`with_columns` apply
@@ -47,7 +39,7 @@ from bdf import _polars_namespace  # noqa: F401  (registers the `bdf` namespace)
 from bdf._df_compat import _classify_df, _from_polars_lazy, _to_polars_lazy
 from bdf._errors import BDFColumnError
 from bdf.recipes import RECIPES, Recipe
-from bdf.spec import COLUMN_ONTOLOGY, Quantity, _slugify, get_unit_conversion, parse_label
+from bdf.spec import COLUMN_ONTOLOGY, Quantity, parse_label
 
 if TYPE_CHECKING:
     from bdf._df_compat import AnyDF
@@ -55,7 +47,6 @@ if TYPE_CHECKING:
 __all__ = ["ColumnName", "can_resolve", "parse_name", "resolve", "select", "with_columns"]
 
 _DIMENSIONLESS = (None, "1")
-_LOWERCASE_PREFIXES = ("m", "k", "u", "n", "p", "c")
 _TEMPERATURE_UNITS = frozenset({"degC", "K", "degF"})
 
 
@@ -66,13 +57,13 @@ class ColumnName:
     Attributes:
         quantity: Machine-readable name of the quantity, e.g. ``"voltage_volt"``.
         unit: The unit the name asks for, e.g. ``"mV"``; the canonical unit
-            when the name gives none, and ``None`` for unitless quantities.
+            for a machine-readable name, and ``None`` for unitless quantities.
 
     Examples:
         >>> parse_name("Voltage / mV")
         ColumnName(quantity='voltage_volt', unit='mV')
-        >>> parse_name("net_capacity_mah")
-        ColumnName(quantity='net_capacity_ah', unit='mAh')
+        >>> parse_name("voltage_volt")
+        ColumnName(quantity='voltage_volt', unit='V')
     """
 
     quantity: str
@@ -88,8 +79,6 @@ class _NameIndex:
     """Preferred label or machine-readable name -> mr_name."""
     by_base: dict[str, str]
     """Lowercased preferred-label base (``"voltage"``) -> mr_name."""
-    stems: tuple[tuple[str, str, str], ...]
-    """``(stem, canonical_suffix, mr_name)``, longest stem first."""
 
 
 _index_cache: dict[int, _NameIndex] = {}
@@ -103,20 +92,13 @@ def _name_index() -> _NameIndex:
         return cached
     exact: dict[str, str] = {}
     by_base: dict[str, str] = {}
-    stems: list[tuple[str, str, str]] = []
     for mr_name, q in COLUMN_ONTOLOGY:
         if q.deprecated:
             continue
         exact.setdefault(q.formatted_label, mr_name)
         exact.setdefault(q.effective_notation, mr_name)
-        base = q.label_template.split(" / ", 1)[0].strip()
-        by_base.setdefault(base.lower(), mr_name)
-        stem = _slugify(base).replace("-", "_")
-        notation = q.effective_notation
-        if q.unit not in _DIMENSIONLESS and notation.startswith(stem + "_"):
-            stems.append((stem, notation[len(stem) + 1 :], mr_name))
-    stems.sort(key=lambda s: len(s[0]), reverse=True)
-    index = _NameIndex(exact, by_base, tuple(stems))
+        by_base.setdefault(q.label_template.split(" / ", 1)[0].strip().lower(), mr_name)
+    index = _NameIndex(exact, by_base)
     _index_cache.clear()
     _index_cache[key] = index
     return index
@@ -124,24 +106,30 @@ def _name_index() -> _NameIndex:
 
 def _compatible_unit(q: Quantity, unit: str) -> str | None:
     """``unit`` if it converts to the quantity's canonical unit, else None."""
-    if unit in ("C", "c") and q.unit in _TEMPERATURE_UNITS:
-        unit = "degC"
     if q.unit in _DIMENSIONLESS:
         return None
-    return unit if get_unit_conversion(unit, q.unit) is not None else None
+    if unit in ("C", "c") and q.unit in _TEMPERATURE_UNITS:
+        unit = "degC"
+    return unit if q.convert_from(unit) is not None else None
 
 
-def _machine_unit(q: Quantity, token: str, suffix: str) -> str | None:
-    """Unit named by the token after a machine-readable stem, or None."""
-    if token == suffix:
-        return q.unit
-    unit = _compatible_unit(q, token)
-    if unit is not None:
-        return unit
-    for prefix in _LOWERCASE_PREFIXES:
-        if token == prefix + suffix:
-            return _compatible_unit(q, f"{prefix}{q.unit}")
-    return None
+def _machine_name_hint(name: str) -> str:
+    """Point a unit-bearing machine-readable name at the preferred label."""
+    best: Quantity | None = None
+    best_stem = ""
+    for _, q in COLUMN_ONTOLOGY:
+        if q.deprecated or q.unit in _DIMENSIONLESS:
+            continue
+        stem = q.effective_notation.rsplit("_", 1)[0]
+        if name.startswith(stem + "_") and len(stem) > len(best_stem):
+            best, best_stem = q, stem
+    if best is None:
+        return ""
+    base = best.label_template.split(" / ", 1)[0]
+    return (
+        f"; machine-readable names are fixed, so ask for {best.effective_notation!r}, "
+        f"or a preferred label with a unit such as '{base} / <unit>'"
+    )
 
 
 def _parse(name: str) -> ColumnName | str:
@@ -162,28 +150,14 @@ def _parse(name: str) -> ColumnName | str:
                 return ColumnName(mr_name, compatible)
             return f"unit {unit!r} does not convert to {q.formatted_label!r}"
 
-    reason = f"{name!r} is not a BDF preferred label or machine-readable name"
-    for stem, suffix, mr_name in index.stems:
-        if not name.startswith(stem + "_"):
-            continue
-        token = name[len(stem) + 1 :]
-        q = COLUMN_ONTOLOGY[mr_name]
-        machine_unit = _machine_unit(q, token, suffix)
-        if machine_unit is not None:
-            return ColumnName(mr_name, machine_unit)
-        reason = (
-            f"{token!r} is not a unit of {mr_name!r} ({q.unit}); unit symbols are case-sensitive, "
-            f"e.g. '{stem}_m{q.unit}' or '{stem}_milli{suffix}'"
-        )
-        break
-    return reason
+    return f"{name!r} is not a BDF preferred label or machine-readable name{_machine_name_hint(name)}"
 
 
 def parse_name(name: str) -> ColumnName:
-    """Parse a preferred label or machine-readable name, with optional unit.
+    """Parse a preferred label, with optional unit, or a machine-readable name.
 
     Args:
-        name: E.g. ``"Voltage / mV"``, ``"voltage_volt"``, ``"test_time_h"``.
+        name: E.g. ``"Voltage / V"``, ``"Voltage / mV"``, ``"voltage_volt"``.
 
     Returns:
         The quantity and unit the name asks for.
@@ -193,7 +167,7 @@ def parse_name(name: str) -> ColumnName:
             a unit that does not convert to the quantity's canonical unit.
 
     Examples:
-        >>> parse_name("test_time_h")
+        >>> parse_name("Test Time / h")
         ColumnName(quantity='test_time_second', unit='h')
         >>> parse_name("Step ID")
         ColumnName(quantity='step_id', unit=None)
@@ -207,15 +181,10 @@ def parse_name(name: str) -> ColumnName:
 # --------- Resolution ----------
 
 
-def _convert(expr: pl.Expr, src_unit: str | None, dst_unit: str | None) -> pl.Expr:
-    """Apply the linear conversion between two compatible units."""
-    if src_unit == dst_unit or src_unit in _DIMENSIONLESS or dst_unit in _DIMENSIONLESS:
-        return expr
-    if dst_unit in ("C", "c"):
-        dst_unit = "degC"
-    conversion = get_unit_conversion(src_unit, dst_unit)
+def _scale(expr: pl.Expr, conversion: tuple[float, float] | None, src: str | None, dst: str | None) -> pl.Expr:
+    """Apply a ``(scale, offset)`` conversion from :class:`~bdf.spec.Quantity`."""
     if conversion is None:
-        raise BDFColumnError(f"Cannot convert {src_unit!r} to {dst_unit!r}.")
+        raise BDFColumnError(f"Cannot convert {src!r} to {dst!r}.")
     scale, offset = conversion
     if scale == 1.0 and offset == 0.0:
         return expr
@@ -225,6 +194,20 @@ def _convert(expr: pl.Expr, src_unit: str | None, dst_unit: str | None) -> pl.Ex
     if offset != 0.0:
         out = out + offset
     return out
+
+
+def _to_canonical(expr: pl.Expr, q: Quantity, unit: str | None) -> pl.Expr:
+    """Convert ``expr`` from ``unit`` to the quantity's canonical unit."""
+    if unit == q.unit or q.unit in _DIMENSIONLESS:
+        return expr
+    return _scale(expr, q.convert_from(unit), unit, q.unit)
+
+
+def _from_canonical(expr: pl.Expr, q: Quantity, unit: str | None) -> pl.Expr:
+    """Convert ``expr`` from the quantity's canonical unit to ``unit``."""
+    if unit == q.unit or q.unit in _DIMENSIONLESS:
+        return expr
+    return _scale(expr, q.convert_to(unit), q.unit, unit)
 
 
 class _Unresolvable(Exception):
@@ -263,7 +246,7 @@ class _Resolver:
             raise _Unresolvable(f"{quantity!r} is not in the loaded ontology")
         if quantity in self.recorded:
             column, unit = self.recorded[quantity]
-            expr = _convert(pl.col(column), unit, q.unit)
+            expr = _to_canonical(pl.col(column), q, unit)
         else:
             expr = self._from_recipes(quantity, stack | {quantity})
         self._resolved[quantity] = expr
@@ -305,8 +288,7 @@ class _Resolver:
         except _Unresolvable as exc:
             msg = f"Cannot resolve {name!r} from columns {self.available}: {exc.args[0]}"
             raise BDFColumnError(msg) from None
-        q = COLUMN_ONTOLOGY[target.quantity]
-        return _convert(expr, q.unit, target.unit).alias(name)
+        return _from_canonical(expr, COLUMN_ONTOLOGY[target.quantity], target.unit).alias(name)
 
 
 def _flatten(columns: Sequence[str | Iterable[str]]) -> list[str]:
@@ -390,8 +372,8 @@ def with_columns(df: AnyDF, *columns: str | Iterable[str]) -> AnyDF:
     Examples:
         >>> import polars as pl
         >>> df = pl.DataFrame({"Current / A": [1.0, 2.0], "Voltage / V": [3.0, 4.0]})
-        >>> with_columns(df, "Power / W", "current_mA").columns
-        ['Current / A', 'Voltage / V', 'Power / W', 'current_mA']
+        >>> with_columns(df, "Power / W", "Current / mA").columns
+        ['Current / A', 'Voltage / V', 'Power / W', 'Current / mA']
     """
     return _apply(df, columns, keep=True)
 
@@ -413,7 +395,7 @@ def select(df: AnyDF, *columns: str | Iterable[str]) -> AnyDF:
     Examples:
         >>> import polars as pl
         >>> df = pl.DataFrame({"Test Time / s": [0.0, 3600.0], "Voltage / V": [3.0, 4.0]})
-        >>> select(df, "test_time_ms", "Voltage / mV").rows()
-        [(0.0, 3000.0), (3600000.0, 4000.0)]
+        >>> select(df, "Test Time / ms", "voltage_volt").rows()
+        [(0.0, 3.0), (3600000.0, 4.0)]
     """
     return _apply(df, columns, keep=False)

@@ -38,18 +38,13 @@ def cycle() -> pl.DataFrame:
         ("Voltage / V", ColumnName("voltage_volt", "V")),
         ("voltage_volt", ColumnName("voltage_volt", "V")),
         ("Voltage / mV", ColumnName("voltage_volt", "mV")),
-        ("voltage_mV", ColumnName("voltage_volt", "mV")),
-        ("voltage_millivolt", ColumnName("voltage_volt", "millivolt")),
         ("Net Capacity / mAh", ColumnName("net_capacity_ah", "mAh")),
-        ("net_capacity_mAh", ColumnName("net_capacity_ah", "mAh")),
-        ("net_capacity_mah", ColumnName("net_capacity_ah", "mAh")),
-        ("net_energy_kwh", ColumnName("net_energy_wh", "kWh")),
-        ("applied_pressure_MPa", ColumnName("applied_pressure_pa", "MPa")),
-        ("applied_pressure_kpa", ColumnName("applied_pressure_pa", "kPa")),
-        ("test_time_h", ColumnName("test_time_second", "h")),
+        ("net_capacity_ah", ColumnName("net_capacity_ah", "Ah")),
         ("Test Time / min", ColumnName("test_time_second", "min")),
-        ("ambient_temperature_K", ColumnName("ambient_temperature_celsius", "K")),
+        ("Applied Pressure / MPa", ColumnName("applied_pressure_pa", "MPa")),
+        ("Ambient Temperature / K", ColumnName("ambient_temperature_celsius", "K")),
         ("Ambient Temperature / C", ColumnName("ambient_temperature_celsius", "degC")),
+        ("ambient_temperature_celsius", ColumnName("ambient_temperature_celsius", "degC")),
         ("step_count", ColumnName("step_count", "1")),
         ("Step ID", ColumnName("step_id", None)),
         ("cycle_net_capacity_ah", ColumnName("cycle_net_capacity_ah", "Ah")),
@@ -62,9 +57,10 @@ def test_parse_name(name: str, expected: ColumnName) -> None:
 @pytest.mark.parametrize(
     ("name", "match"),
     [
-        # Lowercase symbols collide with other pint units (milliyear, attohour).
-        ("current_ma", "case-sensitive"),
-        ("voltage_mv", "case-sensitive"),
+        # Machine-readable names are fixed identifiers: no unit conversion.
+        ("voltage_mV", r"ask for 'voltage_volt', or a preferred label with a unit such as 'Voltage / <unit>'"),
+        ("voltage_millivolt", "ask for 'voltage_volt'"),
+        ("net_capacity_mah", "ask for 'net_capacity_ah'"),
         ("Voltage / A", "does not convert"),
         ("Foo / V", "not a BDF"),
         ("step_count_mA", "not a BDF"),
@@ -92,24 +88,34 @@ def test_existing_column_passes_through(cycle: pl.DataFrame) -> None:
 
 
 def test_recorded_column_converts_on_request(cycle: pl.DataFrame) -> None:
-    out = select(cycle, "voltage_mV", "Test Time / h", "current_mA")
-    assert out.columns == ["voltage_mV", "Test Time / h", "current_mA"]
+    out = select(cycle, "Voltage / mV", "Test Time / h", "Current / mA")
+    assert out.columns == ["Voltage / mV", "Test Time / h", "Current / mA"]
     assert out.row(-1) == pytest.approx((4000.0, 7190.0 / 3600.0, -500.0))
 
 
-def test_source_in_other_unit_and_machine_style() -> None:
-    df = pl.DataFrame({"voltage_mV": [3000.0], "ambient_temperature_K": [300.0]})
-    out = select(df, "Voltage / V", "ambient_temperature_celsius")
-    assert out.row(0) == pytest.approx((3.0, 300.0 - 273.15))
+def test_recorded_column_in_other_unit_converts_to_canonical() -> None:
+    df = pl.DataFrame({"Voltage / mV": [3000.0], "Ambient Temperature / K": [300.0], "Current / A": [2.0]})
+    out = select(df, "voltage_volt", "ambient_temperature_celsius", "power_watt")
+    assert out.row(0) == pytest.approx((3.0, 300.0 - 273.15, 6.0))
+
+
+def test_machine_readable_columns_in_the_data() -> None:
+    df = pl.DataFrame({"voltage_volt": [3.0], "current_ampere": [2.0]})
+    assert select(df, "Power / mW").item() == pytest.approx(6000.0)
+
+
+def test_machine_readable_request_does_not_convert(cycle: pl.DataFrame) -> None:
+    with pytest.raises(bdf.BDFColumnError, match="machine-readable names are fixed"):
+        select(cycle, "voltage_mV")
 
 
 def test_offset_conversion_from_canonical() -> None:
     df = pl.DataFrame({"Ambient Temperature / degC": [25.0]})
-    assert select(df, "ambient_temperature_K").item() == pytest.approx(298.15)
+    assert select(df, "Ambient Temperature / K").item() == pytest.approx(298.15)
 
 
 def test_power_from_current_and_voltage(cycle: pl.DataFrame) -> None:
-    out = select(cycle, "Power / W", "power_mW")
+    out = select(cycle, "Power / W", "Power / mW")
     assert out.row(0) == pytest.approx((4.0, 4000.0))
 
 
@@ -192,8 +198,8 @@ def test_circular_recipes_terminate() -> None:
 
 
 def test_resolve_needs_only_names() -> None:
-    exprs = resolve(["power_watt", "voltage_mV"], ["Current / A", "Voltage / V"])
-    assert list(exprs) == ["power_watt", "voltage_mV"]
+    exprs = resolve(["power_watt", "Voltage / mV"], ["Current / A", "Voltage / V"])
+    assert list(exprs) == ["power_watt", "Voltage / mV"]
     assert all(isinstance(e, pl.Expr) for e in exprs.values())
 
 
@@ -229,13 +235,13 @@ def test_namespace_chains(cycle: pl.DataFrame) -> None:
 
 
 def test_namespace_on_lazyframe(cycle: pl.DataFrame) -> None:
-    lazy = cycle.lazy().bdf.select("test_time_h", "voltage_mV")
+    lazy = cycle.lazy().bdf.select("Test Time / h", "Voltage / mV")
     assert isinstance(lazy, pl.LazyFrame)
     assert lazy.collect().row(0) == (0.0, 4000.0)
 
 
 def test_namespace_col(cycle: pl.DataFrame) -> None:
-    discharging = cycle.filter(cycle.bdf.col("current_mA") < 0)
+    discharging = cycle.filter(cycle.bdf.col("Current / mA") < 0)
     assert discharging.height == 360
 
 
@@ -281,7 +287,7 @@ def test_register_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(RECIPES, "internal_resistance_ohm", [])
     register_recipe("internal_resistance_ohm", Recipe(("voltage_volt", "current_ampere"), lambda v, i: v / i))
     df = pl.DataFrame({"Voltage / V": [4.0], "Current / A": [2.0]})
-    assert select(df, "internal_resistance_mohm").item() == pytest.approx(2000.0)
+    assert select(df, "Internal Resistance / mohm").item() == pytest.approx(2000.0)
     with pytest.raises(KeyError, match="not_a_quantity"):
         register_recipe("not_a_quantity", Recipe(("voltage_volt",), lambda v: v))
 

@@ -21,8 +21,9 @@ FrameT = TypeVar("FrameT", pl.DataFrame, pl.LazyFrame)
 class BDFNamespace(Generic[FrameT]):
     """Select BDF columns by name, whether recorded or derivable.
 
-    Every method accepts preferred labels (``"Voltage / mV"``) or
-    machine-readable names (``"voltage_mV"``); see :mod:`bdf.columns`.
+    Every method accepts preferred labels, which convert units on request
+    (``"Voltage / mV"``), or machine-readable names (``"voltage_volt"``); see
+    :mod:`bdf.columns`.
 
     Examples:
         >>> import polars as pl
@@ -53,7 +54,7 @@ class BDFNamespace(Generic[FrameT]):
             >>> import polars as pl
             >>> import bdf.columns
             >>> df = pl.DataFrame({"Current / A": [0.5, 2.0]})
-            >>> df.filter(df.bdf.col("current_mA") > 1000).height
+            >>> df.filter(df.bdf.col("Current / mA") > 1000).height
             1
         """
         return self._resolve((name,))[0]

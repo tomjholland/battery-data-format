@@ -51,7 +51,7 @@ there, following the relationships the ontology defines (``prov:wasDerivedFrom``
 
    # Same kind in, same kind out: pandas, polars, or lazy polars.
    df = bdf.with_columns(df, "power_watt", "Net Capacity / mAh")
-   only = bdf.select(df, "test_time_h", "voltage_mV", "net_capacity_ah")
+   only = bdf.select(df, "Test Time / h", "Voltage / mV", "net_capacity_ah")
 
    # Or chain through the `bdf` namespace on polars frames.
    summary = (
@@ -60,26 +60,26 @@ there, following the relationships the ontology defines (``prov:wasDerivedFrom``
        .group_by("Step Count / 1")
        .agg(pl.col("step_discharging_capacity_ah").max())
    )
-   charging = df.filter(df.bdf.col("current_mA") > 0)
+   charging = df.filter(df.bdf.col("Current / mA") > 0)
 
 ``with_columns`` adds the requested columns, ``select`` keeps only them, and
 ``df.bdf.col`` gives one as an expression for the frame's own methods. A
-request is either a preferred label or a machine-readable name, and the unit
-is converted only when the name asks for one:
+request is either a preferred label or a machine-readable name:
 
-=====================  ==============================  =========================================
-Request                Means                           Unit forms
-=====================  ==============================  =========================================
-``Voltage / mV``       voltage in millivolt            any unit pint or UCUM understands
-``voltage_volt``       voltage in its canonical unit   the ontology's machine-readable name
-``voltage_mV``         voltage in millivolt            stem + case-sensitive unit symbol
-``voltage_millivolt``  voltage in millivolt            stem + pint long unit name
-``net_capacity_mah``   net capacity in mAh             SI prefix on the canonical suffix
-=====================  ==============================  =========================================
+=====================  ==========================================
+Request                Gives
+=====================  ==========================================
+``Voltage / V``        voltage in volt, the canonical unit
+``Voltage / mV``       voltage converted to millivolt
+``voltage_volt``       voltage in volt; never converted
+=====================  ==========================================
 
-Unit symbols are case-sensitive, as SI prefixes are: ``power_mW`` is
-milliwatt and ``power_MW`` megawatt. ``current_ma`` is rejected rather than
-guessed, since pint reads ``ma`` as a milliyear.
+Units convert only through preferred labels, and only when the label names a
+unit other than the canonical one; any unit pint or UCUM understands works
+(``Test Time / h``, ``Ambient Temperature / K``). Machine-readable names are
+the ontology's fixed identifiers, so ``voltage_mV`` is rejected rather than
+read as millivolt. Recorded columns in a non-canonical unit are converted to
+the canonical unit before any recipe uses them.
 
 Where several recipes compute a quantity, ``bdf`` prefers, in order: the
 recorded column; a recipe whose inputs are all recorded; a recipe whose inputs
