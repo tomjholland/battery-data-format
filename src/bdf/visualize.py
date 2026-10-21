@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple, Union
 
 import pandas as pd
 
-from bdf import spec
+from bdf import spec, units
 
 X_DEFAULT = spec.COLUMN_ONTOLOGY.test_time_second.formatted_label
 Y_DEFAULT = spec.COLUMN_ONTOLOGY.voltage_volt.formatted_label
@@ -51,7 +51,7 @@ def _convert_for_plot(s: pd.Series, target_unit: Optional[str]) -> Tuple[pd.Seri
     from_u = _effective_unit_for_series(s)
     num = pd.to_numeric(s, errors="coerce")
     if target_unit and from_u:
-        conv = spec.get_unit_conversion(from_u, target_unit)
+        conv = units.get_unit_conversion(from_u, target_unit)
         if conv:
             scale, offset = conv
             return num * scale + offset, from_u, target_unit
@@ -103,7 +103,7 @@ def plot(
     Publication-style BDF plot:
       - Thick, clean lines; dashed major/minor grid
       - Secondary axis via yydata
-      - Unit conversion via xunit/yunit/yyunit (spec.get_unit_conversion)
+      - Unit conversion via xunit/yunit/yyunit (units.get_unit_conversion)
       - Primary axis data is always drawn on top of secondary axis data.
     """
     import matplotlib.pyplot as plt

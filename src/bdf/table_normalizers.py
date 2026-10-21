@@ -37,7 +37,8 @@ from bdf.normalization import (
     RelativeTimeNormalization,
     _is_self_describing,
 )
-from bdf.spec import _UNIT_CAPTURE, COLUMN_ONTOLOGY, get_unit_conversion
+from bdf.spec import COLUMN_ONTOLOGY
+from bdf.units import _UNIT_CAPTURE, get_unit_conversion
 
 _logger = logging.getLogger(__name__)
 

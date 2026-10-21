@@ -15,7 +15,6 @@ Notes:
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import importlib.resources
 import re
@@ -29,12 +28,14 @@ from rdflib import Graph, URIRef
 from rdflib.namespace import OWL, RDF, SKOS
 
 from bdf._df_compat import coerce_dataframe
+from bdf.units import _UNIT_CAPTURE, _normalize_unit, _resolve_bare_c, get_unit_conversion
 
 if TYPE_CHECKING:
     import pint
     import polars as pl
 
     ureg: pint.UnitRegistry
+    """Re-exported from :mod:`bdf.units`."""
 
 # --------- Constants ----------
 
@@ -57,34 +58,6 @@ _VENDOR_SYNONYM_OVERRIDES: dict[str, str] = {
     "ns": "step_id",
     "cycle-index": "cycle_count",
 }
-_UNIT_ALIAS = {
-    "celsius": "degC",
-    "degree_celsius": "degC",
-    "℃": "degC",
-    "degc": "degC",
-    "degreec": "degC",
-    "\xf8c": "degC",
-    "\xf8C": "degC",
-    "\xb0c": "degC",
-    "\xb0C": "degC",
-    "Sec": "second",
-    # UCUM codes used in schema:unitCode annotations (case-sensitive, exact
-    # casing as it appears in the ontology's schema:unitCode literals)
-    "Cel": "degC",
-    "A.h": "Ah",
-    "W.h": "Wh",
-    "Ohm": "ohm",
-    "Ω": "ohm",  # 'ohm' character, 'Omega' character already understood by pint
-    # Vendor casings that pint does not parse. Conversion is case-sensitive
-    # (SI prefixes are: "MW" is not "mW"), so each such spelling is named here.
-    "v": "V",
-    "AH": "Ah",  # Digatron "AhCha#AH"
-}
-
-# Bare "C" or "c" is ambiguous (Celsius vs Coulombs). This set lists the BDF
-# destination units that unambiguously identify a temperature quantity, allowing
-# bare "C"/"c" to be treated as Celsius in get_unit_conversion.
-_TEMPERATURE_DST_UNITS: frozenset[str] = frozenset({"degC", "°C", "K", "degF"})
 _SLASH_RE = re.compile(r"^\s*(.+?)\s*/\s*(.+)\s*$")
 _BDF_LIVE_URL = "https://w3id.org/battery-data-alliance/ontology/battery-data-format"
 _SCHEMA_UNIT_CODE = URIRef("https://schema.org/unitCode")
@@ -93,63 +66,12 @@ _BDF_RELEASE_URL_TMPL = (
     "battery-data-format-ontology/{version}/battery-data-format.ttl"
 )
 
-_ureg: pint.UnitRegistry | None = None
-
-
-def _pint_understands(reg: pint.UnitRegistry, alias: str, canonical: str) -> bool:
-    """True if pint already parses `alias` to the same value as `canonical`.
-
-    Args:
-        reg: Registry to resolve both unit strings against.
-        alias: Candidate unit string (e.g. a UCUM code).
-        canonical: Known-good pint unit string to compare against.
-
-    Returns:
-        True if pint resolves `alias` to the same quantity as `canonical`
-        both at 0 and 1 (catching offset units, not just dimensionality).
-    """
-    import pint
-
-    try:
-        a0, c0 = reg.Quantity(0, alias), reg.Quantity(0, canonical)
-        a1, c1 = reg.Quantity(1, alias), reg.Quantity(1, canonical)
-        return (
-            abs(a0.to(c0.units).magnitude - c0.magnitude) < 1e-9
-            and abs(a1.to(c1.units).magnitude - c1.magnitude) < 1e-9
-        )
-    except (pint.errors.PintError, AssertionError):
-        # PintError covers undefined/incompatible units; AssertionError covers
-        # strings pint's parser chokes on internally (e.g. "℃" / ℃), which
-        # would otherwise escape and crash registry construction on pint >= 0.25.
-        return False
-
-
-def _get_ureg() -> pint.UnitRegistry:
-    """Return the shared unit registry, build on first use then cache.
-
-    Returns:
-        UnitRegistry with the BDF unit aliases defined.
-    """
-    global _ureg
-    if _ureg is None:
-        import pint
-
-        reg: pint.UnitRegistry = pint.UnitRegistry()
-        for alias, canonical in _UNIT_ALIAS.items():
-            if _pint_understands(reg, alias, canonical):
-                continue
-            # @alias adds another name to the existing unit (preserving offset
-            # behavior for affine units like degC), unlike `name = degC`, which
-            # would silently define a new non-offset unit.
-            with contextlib.suppress(Exception):
-                reg.define(f"@alias {canonical} = {alias}")
-        _ureg = reg
-    return _ureg
-
 
 def __getattr__(name: str) -> Any:
-    """Get lazily built module attributes."""
+    """Keep ``bdf.spec.ureg`` working; the registry lives in :mod:`bdf.units`."""
     if name == "ureg":
+        from bdf.units import _get_ureg
+
         return _get_ureg()
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
@@ -170,21 +92,6 @@ def _slugify(text: str) -> str:
     return _SLUG.sub("-", text.lower()).strip("-")
 
 
-def _normalize_unit(unit: str) -> str:
-    """Map known unit aliases (e.g. 'celsius') to canonical pint strings.
-
-    Args:
-        unit: Unit string to normalize.
-
-    Returns:
-        Canonical pint unit string.
-    """
-    key = unit.strip()
-    if not key:
-        return key
-    return _UNIT_ALIAS.get(key, key)
-
-
 def parse_label(label: str) -> tuple[str, str] | None:
     """Split 'Base / unit' into (base, normalised_unit), or None if not parseable.
 
@@ -202,49 +109,6 @@ def parse_label(label: str) -> tuple[str, str] | None:
     if not base or not unit:
         return None
     return base, unit
-
-
-_UNIT_CAPTURE = r"([A-Za-z0-9.·/*^%°℃ΩΩµμ⁰¹²³⁴⁵⁶⁷⁸⁹⁻ \-]+)"  # omega/ohm and mu/micro are different characters
-
-
-def get_unit_conversion(src_unit: str | None, dst_unit: str | None) -> tuple[float, float] | None:
-    """Return (scale, offset) for src→dst unit conversion, None if incompatible.
-
-    Args:
-        src_unit: Source unit string (or None for dimensionless).
-        dst_unit: Destination unit string (or None for dimensionless).
-
-    Returns:
-        Tuple of (scale, offset) for conversion, or None if incompatible.
-    """
-    src_bare = _normalize_unit((src_unit or "").strip())
-    dst_bare = _normalize_unit((dst_unit or "").strip())
-    src_is_dim = src_bare in ("", "1")
-    dst_is_dim = dst_bare in ("1", "")
-    if src_is_dim or dst_is_dim:
-        return (1.0, 0.0) if src_is_dim and dst_is_dim else None
-    if src_bare == dst_bare:
-        return (1.0, 0.0)
-    if src_bare in ("C", "c") and dst_bare in _TEMPERATURE_DST_UNITS:
-        src_bare = "degC"
-
-    import pint
-
-    reg = _get_ureg()
-    try:
-        src_zero, dst_zero = reg.Quantity(0, src_bare), reg.Quantity(0, dst_bare)
-        if src_zero.dimensionality != dst_zero.dimensionality:
-            return None
-        # Scale from a difference of two quantities, which pint gives in delta
-        # units (delta_degC for degC), so offset units convert without the
-        # cancellation of subtracting two converted values.
-        src_step = reg.Quantity(1, src_bare) - src_zero
-        dst_step_units = (reg.Quantity(1, dst_bare) - dst_zero).units
-        scale = float(src_step.to(dst_step_units).magnitude)
-        offset = float(src_zero.to(dst_zero.units).magnitude)
-        return (scale, offset)
-    except (pint.errors.PintError, AssertionError):
-        return None
 
 
 def unit_from_label(label: str) -> str | None:
@@ -799,6 +663,39 @@ class ColumnOntology:
                     first_deprecated = (q, unit)
         return first_deprecated
 
+    def quantity_from_name(self, name: str) -> tuple[Quantity, str | None] | None:
+        """Return (Quantity, unit) for a machine-readable name or preferred label, or None.
+
+        A machine-readable name (``"voltage_volt"``) is a fixed identifier and
+        always gives the canonical unit. A preferred label gives the unit it
+        names, which may differ from the canonical one (``"Voltage / mV"``) but
+        must convert to it. Deprecated quantities do not match.
+
+        Args:
+            name: Machine-readable name or preferred label.
+
+        Returns:
+            Tuple of (Quantity, unit) in the shape of :meth:`quantity_from_label`,
+            or None if the name matches no current quantity or its unit does not
+            convert to the canonical unit.
+        """
+        for _, q in self:
+            if not q.deprecated and q.effective_notation == name:
+                return (q, q.unit)
+        match = self.quantity_from_label(name)
+        if match is None or match[0].deprecated:
+            return None
+        q, unit = match
+        if unit is None or unit == q.unit:
+            return (q, q.unit)
+        if q.unit in (None, "1"):
+            # Dimensionless and unitless quantities have no other unit to give.
+            return None
+        unit = _resolve_bare_c(unit, q.unit)
+        if q.convert_from(unit) is None:
+            return None
+        return (q, unit)
+
     def mr_name_from_label(self, label: str) -> str | None:
         """Return the mr_name whose label_template base matches label, or None.
 
@@ -1075,8 +972,9 @@ __all__ = [
     "ColumnOntology",
     "Quantity",
     "COLUMN_ONTOLOGY",
-    "ureg",
     "parse_label",
     "unit_from_label",
+    # re-exported from bdf.units
+    "ureg",
     "get_unit_conversion",
 ]

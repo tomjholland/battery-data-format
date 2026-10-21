@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import bdf
-from bdf.columns import select
+from bdf.recipes import select
 
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "examples" / "reference"
 

@@ -23,11 +23,11 @@ class BDFNamespace(Generic[FrameT]):
 
     Every method accepts preferred labels, which convert units on request
     (``"Voltage / mV"``), or machine-readable names (``"voltage_volt"``); see
-    :mod:`bdf.columns`.
+    :mod:`bdf.recipes`.
 
     Examples:
         >>> import polars as pl
-        >>> import bdf.columns
+        >>> import bdf.recipes
         >>> df = pl.DataFrame({"Current / A": [1.0, -1.0], "Voltage / V": [4.0, 3.0]})
         >>> df.bdf.with_columns("power_watt").filter(pl.col("power_watt") > 0).height
         1
@@ -37,7 +37,7 @@ class BDFNamespace(Generic[FrameT]):
         self._df = df
 
     def _resolve(self, columns: tuple[str | Iterable[str], ...]) -> list[pl.Expr]:
-        from bdf.columns import _flatten, resolve
+        from bdf.recipes import _flatten, resolve
 
         return list(resolve(_flatten(columns), self._df.collect_schema().names()).values())
 
@@ -52,7 +52,7 @@ class BDFNamespace(Generic[FrameT]):
 
         Examples:
             >>> import polars as pl
-            >>> import bdf.columns
+            >>> import bdf.recipes
             >>> df = pl.DataFrame({"Current / A": [0.5, 2.0]})
             >>> df.filter(df.bdf.col("Current / mA") > 1000).height
             1

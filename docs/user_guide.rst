@@ -87,7 +87,7 @@ are themselves derived. Among recipes, those using a recorded charge or
 energy counter come before integrating current or power over time, which is
 the least trustworthy reconstruction. The recipes live in
 ``bdf.recipes.RECIPES``; add your own with ``bdf.recipes.register_recipe``. To
-plan without data, ``bdf.columns.resolve(columns, available_names)`` returns
+plan without data, ``bdf.recipes.resolve(columns, available_names)`` returns
 one polars expression per request.
 
 Recipes that accumulate assume the rows are one test in time order, so derive

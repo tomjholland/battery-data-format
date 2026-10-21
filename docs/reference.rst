@@ -28,8 +28,8 @@ Python API
    bdf.validate
    bdf.select
    bdf.with_columns
-   bdf.columns
    bdf.recipes
+   bdf.units
    bdf.clean
    bdf.plot
    bdf.explore

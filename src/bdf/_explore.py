@@ -5,7 +5,7 @@ from typing import Optional
 
 import pandas as pd
 
-from . import spec
+from . import spec, units
 from .visualize import X_DEFAULT, Y_DEFAULT
 
 
@@ -20,7 +20,7 @@ def _prepare_series(series: pd.Series, unit: Optional[str]) -> pd.Series:
     src = spec.unit_from_label(str(series.name))
     if not src:
         return series
-    conv = spec.get_unit_conversion(src, unit)
+    conv = units.get_unit_conversion(src, unit)
     if not conv:
         return series
     scale, offset = conv

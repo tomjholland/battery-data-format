@@ -12,8 +12,8 @@ this page is the map for contributors.
       │  synonyms, deprecations (isReplacedBy), derived-column rules
       ▼
   bundled ontology snapshot  (src/bdf/data/, synced by CI at each release)
-      │  loaded by spec.py into ColumnOntology: labels, unit conversion,
-      │  synonym index, validity rules
+      │  loaded by spec.py into ColumnOntology: labels, synonym index,
+      │  validity rules; units.py converts units (pint)
       ▼
   plugins  (src/bdf/plugins.py — one Plugin per vendor format)
       │  each plugin pairs:
@@ -29,6 +29,9 @@ this page is the map for contributors.
       │  save()  → BDF artifact + .metadata.json sidecar
       │  time-scale detection runs on read (fsck model: loud by default,
       │  repair only with reconcile_time=True)
+      ▼
+  recipes  (recipes.py: any BDF column by name, recorded or derived;
+      │   bdf.select / bdf.with_columns, and df.bdf on polars frames)
       ▼
   validate / repair  (_validate.py, repair.py)
       │  schema, unit, monotonicity, derived-column consistency checks;

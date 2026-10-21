@@ -9,8 +9,7 @@ import polars as pl
 import pytest
 
 import bdf
-from bdf.columns import can_resolve, parse_name, resolve, select, with_columns
-from bdf.recipes import RECIPES, Recipe, register_recipe
+from bdf.recipes import RECIPES, Recipe, can_resolve, register_recipe, resolve, select, with_columns
 from bdf.spec import COLUMN_ONTOLOGY
 
 
@@ -29,55 +28,22 @@ def cycle() -> pl.DataFrame:
     )
 
 
-# --------- Name parsing ----------
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("Voltage / V", ("voltage_volt", "V")),
-        ("voltage_volt", ("voltage_volt", "V")),
-        ("Voltage / mV", ("voltage_volt", "mV")),
-        ("Net Capacity / mAh", ("net_capacity_ah", "mAh")),
-        ("net_capacity_ah", ("net_capacity_ah", "Ah")),
-        ("Test Time / min", ("test_time_second", "min")),
-        ("Applied Pressure / MPa", ("applied_pressure_pa", "MPa")),
-        ("Ambient Temperature / K", ("ambient_temperature_celsius", "K")),
-        ("Ambient Temperature / C", ("ambient_temperature_celsius", "degC")),
-        ("ambient_temperature_celsius", ("ambient_temperature_celsius", "degC")),
-        ("step_count", ("step_count", "1")),
-        ("Step ID", ("step_id", None)),
-        ("cycle_net_capacity_ah", ("cycle_net_capacity_ah", "Ah")),
-    ],
-)
-def test_parse_name(name: str, expected: tuple[str, str | None]) -> None:
-    q, unit = parse_name(name)
-    assert (q.mr_name, unit) == expected
+# --------- Requests ----------
 
 
 @pytest.mark.parametrize(
     ("name", "match"),
     [
         # Machine-readable names are fixed identifiers: no unit conversion.
-        ("voltage_mV", r"ask for 'voltage_volt', or a preferred label with a unit such as 'Voltage / <unit>'"),
-        ("voltage_millivolt", "ask for 'voltage_volt'"),
-        ("net_capacity_mah", "ask for 'net_capacity_ah'"),
-        ("Voltage / A", "does not convert"),
-        ("Foo / V", "not a BDF"),
-        ("step_count_mA", "not a BDF"),
+        ("voltage_mV", "machine-readable names are fixed"),
+        ("net_capacity_mah", "machine-readable names are fixed"),
+        ("Voltage / A", "unit 'A' does not convert to 'Voltage / V'"),
+        ("Foo / V", "not a BDF preferred label"),
     ],
 )
-def test_parse_name_rejects(name: str, match: str) -> None:
+def test_unparseable_request_explains(cycle: pl.DataFrame, name: str, match: str) -> None:
     with pytest.raises(bdf.BDFColumnError, match=match):
-        parse_name(name)
-
-
-def test_every_quantity_parses_from_both_label_styles() -> None:
-    for mr_name, q in COLUMN_ONTOLOGY:
-        if q.deprecated:
-            continue
-        assert parse_name(q.formatted_label)[0].mr_name == mr_name
-        assert parse_name(q.effective_notation)[0].mr_name == mr_name
+        select(cycle, name)
 
 
 # --------- Resolution ----------
@@ -103,11 +69,6 @@ def test_recorded_column_in_other_unit_converts_to_canonical() -> None:
 def test_machine_readable_columns_in_the_data() -> None:
     df = pl.DataFrame({"voltage_volt": [3.0], "current_ampere": [2.0]})
     assert select(df, "Power / mW").item() == pytest.approx(6000.0)
-
-
-def test_machine_readable_request_does_not_convert(cycle: pl.DataFrame) -> None:
-    with pytest.raises(bdf.BDFColumnError, match="machine-readable names are fixed"):
-        select(cycle, "voltage_mV")
 
 
 def test_offset_conversion_from_canonical() -> None:

@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from .battinfo.generated.equipment_schema import BattinfoEquipmentInstance
     from .battinfo.generated.test_protocol_schema import BattinfoTestProtocol
     from .battinfo.generated.test_schema import BattinfoTest
-    from .columns import select, with_columns
     from .io import read, save, scan
     from .metadata import BattinfoDataset, BdfReadInfo, Metadata
     from .metadata_targets import METADATA
@@ -31,6 +30,7 @@ if TYPE_CHECKING:
         RelativeTimeNormalization,
     )
     from .plugins import detect
+    from .recipes import select, with_columns
     from .registry_ld import build_registry, search, sparql
     from .repair import CleanReport, clean
     from .table_normalizers import normalize
@@ -102,8 +102,8 @@ _LAZY_ATTRS: dict[str, str] = {
     "BDFValidationError": "._errors",
     "BDFMetadataError": "._errors",
     "BDFColumnError": "._errors",
-    "select": ".columns",
-    "with_columns": ".columns",
+    "select": ".recipes",
+    "with_columns": ".recipes",
     "IdentityNormalization": ".normalization",
     "LinearNormalization": ".normalization",
     "AbsoluteTimeNormalization": ".normalization",

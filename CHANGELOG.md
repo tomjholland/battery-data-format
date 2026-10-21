@@ -8,8 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `bdf.with_columns(df, *columns)` and `bdf.select(df, *columns)` return any BDF column by preferred label or machine-readable name, whether recorded, in another unit, or derivable by recipe from the columns present (#136). Accept pandas, polars, or lazy polars frames and return the same kind.
 - A `bdf` namespace on polars frames: `df.bdf.with_columns(...)`, `df.bdf.select(...)`, and `df.bdf.col(...)` for chaining, e.g. `df.bdf.with_columns("power_watt").filter(...)`.
 - Unit conversion on request through preferred labels, e.g. `"Voltage / mV"`; machine-readable names such as `"voltage_volt"` always give the canonical unit.
-- `bdf.recipes`: the registry of recipes that derive quantities (net, charging, discharging and cumulative capacity and energy in every scope, power, test and step time, step count, impedance modulus and phase), with `register_recipe` to extend it. `bdf.columns.resolve` plans the expressions from column names alone.
+- `bdf.recipes`: the resolver and the registry of recipes that derive quantities (net, charging, discharging and cumulative capacity and energy in every scope, power, test and step time, step count, impedance modulus and phase), with `register_recipe` to extend it. `bdf.recipes.resolve` plans the expressions from column names alone.
+- `ColumnOntology.quantity_from_name` matches a machine-readable name or a preferred label, checking that a label's unit converts to the canonical unit.
 - `BDFColumnError`, raised when a requested column cannot be parsed or resolved.
+### Fixed
+- `get_unit_conversion` is case-sensitive: `"MW"` to `"mW"` gives 1e9, where units differing only in case used to convert at 1. The vendor casings that relied on this (`"v"`, Digatron's `"AH"`) are registered as pint aliases.
+- `get_unit_conversion` keeps full precision: scales are no longer rounded to 15 decimal places (which reduced `s` to `h` to 12 significant figures and `ps` to `h` to 0), and offset units no longer lose digits to cancellation (`degF` to `degC` gave 0.5555555555555429).
 
 ## [0.2.0] - Unreleased
 ### Breaking
@@ -31,7 +35,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `ingest()` gets the same kwarg changes as `read`/`scan`/`save`: `include_optional` removed, `include_unknown` added, and `human: bool = False` → `labels: Literal["preferred", "machine", "unchanged"] = "machine"`.
 - `ingest` CLI: `--include-optional` removed, `--include-unknown` added, `--labels` option added.
 - CLI: `clean` and `plot` no longer take `--assume-bdf`.
-- Column spec is now ontology-driven (`bdf.spec.ColumnOntology`, synced from the published BDF ontology release); `bdf.normalize`, `bdf.units`, `bdf.detect`, and `bdf.data_sources` are removed in favor of `bdf.plugins`, `bdf.table_parsers`, `bdf.metadata_parsers`, and `bdf.table_normalizers`.
+- Column spec is now ontology-driven (`bdf.spec.ColumnOntology`, synced from the published BDF ontology release); `bdf.normalize`, `bdf.detect`, and `bdf.data_sources` are removed in favor of `bdf.plugins`, `bdf.table_parsers`, `bdf.metadata_parsers`, and `bdf.table_normalizers`.
+- `bdf.units` is rewritten: it holds the shared pint registry (`ureg`) and `get_unit_conversion`, which `bdf.spec` also re-exports. The previous `bdf.units` API is removed.
 - `fastnda` install extra renamed to `nda`.
 - Module paths `bdf.validate`, `bdf.templates`, and `bdf.ingest` renamed to private submodules; the `validate()`, `templates()`, and `ingest()` functions are unchanged and remain importable from the `bdf` namespace. Fixes module/function name collisions.
 - `Quantity.unit_conversion` renamed to `convert_to`.
