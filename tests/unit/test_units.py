@@ -170,7 +170,7 @@ def test_get_unit_conversion_physical_src_none_dst() -> None:
     assert get_unit_conversion("V", None) is None
 
 
-def test_spec_reexports_unit_conversion() -> None:
-    """bdf.spec keeps get_unit_conversion and ureg, which it published before bdf.units existed."""
-    assert spec.get_unit_conversion is get_unit_conversion
-    assert spec.ureg is units.ureg
+def test_spec_no_longer_exposes_unit_conversion() -> None:
+    """Unit handling lives in bdf.units alone; bdf.spec does not re-export it."""
+    assert "get_unit_conversion" not in spec.__all__
+    assert not hasattr(spec, "ureg")

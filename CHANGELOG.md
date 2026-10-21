@@ -36,7 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `ingest` CLI: `--include-optional` removed, `--include-unknown` added, `--labels` option added.
 - CLI: `clean` and `plot` no longer take `--assume-bdf`.
 - Column spec is now ontology-driven (`bdf.spec.ColumnOntology`, synced from the published BDF ontology release); `bdf.normalize`, `bdf.detect`, and `bdf.data_sources` are removed in favor of `bdf.plugins`, `bdf.table_parsers`, `bdf.metadata_parsers`, and `bdf.table_normalizers`.
-- `bdf.units` is rewritten: it holds the shared pint registry (`ureg`) and `get_unit_conversion`, which `bdf.spec` also re-exports. The previous `bdf.units` API is removed.
+- `bdf.units` is rewritten: it holds the shared pint registry (`ureg`) and `get_unit_conversion`, moved from `bdf.spec`, which no longer provides them. The previous `bdf.units` API is removed.
 - `fastnda` install extra renamed to `nda`.
 - Module paths `bdf.validate`, `bdf.templates`, and `bdf.ingest` renamed to private submodules; the `validate()`, `templates()`, and `ingest()` functions are unchanged and remain importable from the `bdf` namespace. Fixes module/function name collisions.
 - `Quantity.unit_conversion` renamed to `convert_to`.

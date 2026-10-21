@@ -27,15 +27,12 @@ from pydantic import BaseModel, field_validator, model_validator
 from rdflib import Graph, URIRef
 from rdflib.namespace import OWL, RDF, SKOS
 
+from bdf import units
 from bdf._df_compat import coerce_dataframe
-from bdf.units import _UNIT_CAPTURE, _normalize_unit, _resolve_bare_c, get_unit_conversion
+from bdf.units import _UNIT_CAPTURE, _normalize_unit, _resolve_bare_c
 
 if TYPE_CHECKING:
-    import pint
     import polars as pl
-
-    ureg: pint.UnitRegistry
-    """Re-exported from :mod:`bdf.units`."""
 
 # --------- Constants ----------
 
@@ -65,16 +62,6 @@ _BDF_RELEASE_URL_TMPL = (
     "https://raw.githubusercontent.com/battery-data-alliance/"
     "battery-data-format-ontology/{version}/battery-data-format.ttl"
 )
-
-
-def __getattr__(name: str) -> Any:
-    """Keep ``bdf.spec.ureg`` working; the registry lives in :mod:`bdf.units`."""
-    if name == "ureg":
-        from bdf.units import _get_ureg
-
-        return _get_ureg()
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
 
 
 # --------- Helper functions ----------
@@ -310,7 +297,7 @@ class Quantity(BaseModel):
         Returns:
             Tuple of (scale, offset) for conversion, or None if incompatible.
         """
-        return get_unit_conversion(self.unit, dst_unit)
+        return units.get_unit_conversion(self.unit, dst_unit)
 
     def convert_from(self, src_unit: str | None) -> tuple[float, float] | None:
         """Return (scale, offset) to convert src_unit → self.unit, or None if incompatible.
@@ -321,7 +308,7 @@ class Quantity(BaseModel):
         Returns:
             Tuple of (scale, offset) for conversion, or None if incompatible.
         """
-        return get_unit_conversion(src_unit, self.unit)
+        return units.get_unit_conversion(src_unit, self.unit)
 
     @property
     def effective_notation(self) -> str:
@@ -597,7 +584,7 @@ class ColumnOntology:
             pattern = _UNIT_CAPTURE.join(re.escape(p) for p in parts)
             for c in cols - canonical - handled:
                 m = re.fullmatch(pattern, c)
-                if m is None or get_unit_conversion(m.group(1), q.unit) is None:
+                if m is None or units.get_unit_conversion(m.group(1), q.unit) is None:
                     continue
                 non_canonical_units.append((c, q.formatted_label))
                 handled.add(c)
@@ -974,7 +961,4 @@ __all__ = [
     "COLUMN_ONTOLOGY",
     "parse_label",
     "unit_from_label",
-    # re-exported from bdf.units
-    "ureg",
-    "get_unit_conversion",
 ]
