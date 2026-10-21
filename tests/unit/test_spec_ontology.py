@@ -156,7 +156,11 @@ def test_pint_understands_never_propagates_on_pathological_alias() -> None:
     [
         # Identity
         ("V", "V", (1.0, 0.0)),
-        ("v", "V", (1.0, 0.0)),  # case-insensitive identity short-circuit
+        ("v", "V", (1.0, 0.0)),  # vendor casing, registered in _UNIT_ALIAS
+        ("AH", "Ah", (1.0, 0.0)),  # Digatron casing, registered in _UNIT_ALIAS
+        # Case-sensitive: SI prefixes differ by case
+        ("MW", "mW", (1.0e9, 0.0)),
+        ("mW", "MW", (1.0e-9, 0.0)),
         # Scale-only
         ("V", "mV", (1000.0, 0.0)),
         ("kV", "V", (1000.0, 0.0)),
@@ -380,6 +384,26 @@ def test_step_type_unit_none_dtype_str_label() -> None:
     assert q.unit is None
     assert q.dtype == "str"
     assert q.formatted_label == "Step Type"
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "expected"),
+    [
+        ("s", "h", (1 / 3600, 0.0)),
+        ("ps", "h", (1e-12 / 3600, 0.0)),
+        ("ms", "s", (0.001, 0.0)),
+        ("degF", "degC", (5 / 9, -160 / 9)),
+        ("degC", "degF", (9 / 5, 32.0)),
+    ],
+)
+def test_get_unit_conversion_keeps_full_precision(src: str, dst: str, expected: tuple[float, float]) -> None:
+    """Factors keep their significant digits: no rounding, no cancellation in the scale."""
+    result = get_unit_conversion(src, dst)
+    assert result is not None
+    scale, offset = result
+    assert scale == pytest.approx(expected[0], rel=1e-15)
+    # The offset is pint's own conversion of zero, accurate to a few ulp.
+    assert offset == pytest.approx(expected[1], rel=1e-14, abs=1e-12)
 
 
 def test_get_unit_conversion_none_dst_none_src() -> None:

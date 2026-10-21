@@ -75,6 +75,10 @@ _UNIT_ALIAS = {
     "W.h": "Wh",
     "Ohm": "ohm",
     "Ω": "ohm",  # 'ohm' character, 'Omega' character already understood by pint
+    # Vendor casings that pint does not parse. Conversion is case-sensitive
+    # (SI prefixes are: "MW" is not "mW"), so each such spelling is named here.
+    "v": "V",
+    "AH": "Ah",  # Digatron "AhCha#AH"
 }
 
 # Bare "C" or "c" is ambiguous (Celsius vs Coulombs). This set lists the BDF
@@ -219,7 +223,7 @@ def get_unit_conversion(src_unit: str | None, dst_unit: str | None) -> tuple[flo
     dst_is_dim = dst_bare in ("1", "")
     if src_is_dim or dst_is_dim:
         return (1.0, 0.0) if src_is_dim and dst_is_dim else None
-    if src_bare.lower() == dst_bare.lower():
+    if src_bare == dst_bare:
         return (1.0, 0.0)
     if src_bare in ("C", "c") and dst_bare in _TEMPERATURE_DST_UNITS:
         src_bare = "degC"
@@ -228,14 +232,16 @@ def get_unit_conversion(src_unit: str | None, dst_unit: str | None) -> tuple[flo
 
     reg = _get_ureg()
     try:
-        qty_dst = reg.Quantity(1, dst_bare)
-        tgt_units = qty_dst.units
-        if reg.Quantity(1, src_bare).dimensionality != qty_dst.dimensionality:
+        src_zero, dst_zero = reg.Quantity(0, src_bare), reg.Quantity(0, dst_bare)
+        if src_zero.dimensionality != dst_zero.dimensionality:
             return None
-        at_zero = float(reg.Quantity(0, src_bare).to(tgt_units).magnitude)
-        at_one = float(reg.Quantity(1, src_bare).to(tgt_units).magnitude)
-        scale = round(at_one - at_zero, 15)
-        offset = round(at_zero, 15)
+        # Scale from a difference of two quantities, which pint gives in delta
+        # units (delta_degC for degC), so offset units convert without the
+        # cancellation of subtracting two converted values.
+        src_step = reg.Quantity(1, src_bare) - src_zero
+        dst_step_units = (reg.Quantity(1, dst_bare) - dst_zero).units
+        scale = float(src_step.to(dst_step_units).magnitude)
+        offset = float(src_zero.to(dst_zero.units).magnitude)
         return (scale, offset)
     except (pint.errors.PintError, AssertionError):
         return None
