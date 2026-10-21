@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ._errors import BDFMetadataError, BDFValidationError
+    from ._errors import BDFColumnError, BDFMetadataError, BDFValidationError
     from ._explore import explore
     from ._ingest import ingest
     from ._registry import get_entry, load_registry
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from .battinfo.generated.equipment_schema import BattinfoEquipmentInstance
     from .battinfo.generated.test_protocol_schema import BattinfoTestProtocol
     from .battinfo.generated.test_schema import BattinfoTest
+    from .columns import select, with_columns
     from .io import read, save, scan
     from .metadata import BattinfoDataset, BdfReadInfo, Metadata
     from .metadata_targets import METADATA
@@ -43,6 +45,9 @@ __all__ = [
     "validate",
     "validate_df",
     "detect",
+    # BDF columns by name: recorded, unit-converted, or derived
+    "select",
+    "with_columns",
     # shared value/column normalizations
     "IdentityNormalization",
     "LinearNormalization",
@@ -82,6 +87,7 @@ __all__ = [
     # errors
     "BDFValidationError",
     "BDFMetadataError",
+    "BDFColumnError",
 ]
 
 
@@ -95,6 +101,9 @@ _LAZY_ATTRS: dict[str, str] = {
     "validate_df": "._validate",
     "BDFValidationError": "._errors",
     "BDFMetadataError": "._errors",
+    "BDFColumnError": "._errors",
+    "select": ".columns",
+    "with_columns": ".columns",
     "IdentityNormalization": ".normalization",
     "LinearNormalization": ".normalization",
     "AbsoluteTimeNormalization": ".normalization",
@@ -198,6 +207,12 @@ def _enable_short_warnings() -> bool:
 # Install the formatter (opt-in via env var).
 if _enable_short_warnings():
     warnings.formatwarning = _bdf_short_formatwarning
+
+
+# Register the `bdf` namespace on polars frames when polars is already loaded;
+# otherwise it registers the first time a bdf module imports polars.
+if "polars" in sys.modules:
+    from . import _polars_namespace  # noqa: F401
 
 
 # ----- dataset helpers (lazy to avoid cycles) -----

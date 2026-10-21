@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- `bdf.with_columns(df, *columns)` and `bdf.select(df, *columns)` return any BDF column by preferred label or machine-readable name, whether recorded, in another unit, or derivable by recipe from the columns present (#136). Accept pandas, polars, or lazy polars frames and return the same kind.
+- A `bdf` namespace on polars frames: `df.bdf.with_columns(...)`, `df.bdf.select(...)`, and `df.bdf.col(...)` for chaining, e.g. `df.bdf.with_columns("power_watt").filter(...)`.
+- Unit conversion on request in either label style: `"Voltage / mV"`, `"voltage_mV"`, `"voltage_millivolt"`, `"net_capacity_mah"`.
+- `bdf.recipes`: the registry of recipes that derive quantities (net, charging, discharging and cumulative capacity and energy in every scope, power, test and step time, step count, impedance modulus and phase), with `register_recipe` to extend it. `bdf.columns.resolve` plans the expressions from column names alone.
+- `BDFColumnError`, raised when a requested column cannot be parsed or resolved.
 
 ## [0.2.0] - Unreleased
 ### Breaking

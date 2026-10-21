@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import pandas as pd
 import polars as pl
 
+from bdf import _polars_namespace  # noqa: F401  (registers the `bdf` namespace on read frames)
 from bdf._time_scale import detect_scale_mismatch
 from bdf.file_utils import open_compressed, strip_compression_suffix
 from bdf.metadata import Metadata

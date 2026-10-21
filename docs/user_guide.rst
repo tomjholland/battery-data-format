@@ -34,6 +34,65 @@ format is in play, so the assumption is never silent. Formats that already
 embed an offset (e.g. Digatron's ``%:z``-suffixed timestamps) ignore ``tz``
 entirely — the embedded offset is authoritative.
 
+Columns by name: recorded, converted, or derived
+------------------------------------------------
+
+Ask for any BDF column by name, whether or not the file records it. ``bdf``
+uses the recorded column where there is one, converts its unit if you asked
+for a different one, and otherwise computes it from the columns that are
+there, following the relationships the ontology defines (``prov:wasDerivedFrom``).
+
+.. code-block:: python
+
+   import bdf
+   import polars as pl
+
+   df, meta = bdf.read("raw_vendor.csv")
+
+   # Same kind in, same kind out: pandas, polars, or lazy polars.
+   df = bdf.with_columns(df, "power_watt", "Net Capacity / mAh")
+   only = bdf.select(df, "test_time_h", "voltage_mV", "net_capacity_ah")
+
+   # Or chain through the `bdf` namespace on polars frames.
+   summary = (
+       df.bdf.with_columns("step_discharging_capacity_ah", "Test Time / h")
+       .filter(pl.col("Step Count / 1") > 2)
+       .group_by("Step Count / 1")
+       .agg(pl.col("step_discharging_capacity_ah").max())
+   )
+   charging = df.filter(df.bdf.col("current_mA") > 0)
+
+``with_columns`` adds the requested columns, ``select`` keeps only them, and
+``df.bdf.col`` gives one as an expression for the frame's own methods. A
+request is either a preferred label or a machine-readable name, and the unit
+is converted only when the name asks for one:
+
+=====================  ==============================  =========================================
+Request                Means                           Unit forms
+=====================  ==============================  =========================================
+``Voltage / mV``       voltage in millivolt            any unit pint or UCUM understands
+``voltage_volt``       voltage in its canonical unit   the ontology's machine-readable name
+``voltage_mV``         voltage in millivolt            stem + case-sensitive unit symbol
+``voltage_millivolt``  voltage in millivolt            stem + pint long unit name
+``net_capacity_mah``   net capacity in mAh             SI prefix on the canonical suffix
+=====================  ==============================  =========================================
+
+Unit symbols are case-sensitive, as SI prefixes are: ``power_mW`` is
+milliwatt and ``power_MW`` megawatt. ``current_ma`` is rejected rather than
+guessed, since pint reads ``ma`` as a milliyear.
+
+Where several recipes compute a quantity, ``bdf`` prefers, in order: the
+recorded column; a recipe whose inputs are all recorded; a recipe whose inputs
+are themselves derived. Among recipes, those using a recorded charge or
+energy counter come before integrating current or power over time, which is
+the least trustworthy reconstruction. The recipes live in
+``bdf.recipes.RECIPES``; add your own with ``bdf.recipes.register_recipe``. To
+plan without data, ``bdf.columns.resolve(columns, available_names)`` returns
+one polars expression per request.
+
+Recipes that accumulate assume the rows are one test in time order, so derive
+columns before filtering rows rather than after.
+
 Workflows
 ---------
 
