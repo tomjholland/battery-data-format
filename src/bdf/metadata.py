@@ -13,13 +13,15 @@ from pydantic import (
     Field,
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
+    PrivateAttr,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
 )
 from pydantic_core import CoreSchema, InitErrorDetails, PydanticCustomError, core_schema
 
 from bdf.battinfo.record import Record, _absolute_refs, _coerce
-from bdf.battinfo.schema import BATTINFO_SCHEMA
+from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -43,54 +45,73 @@ _ENTITY_DOCS: dict[str, str] = {
 }
 
 
-# The root-node cache, and the `docs` mapping it was filled from. Holding
-# that mapping here keeps it alive, so its address cannot be reused for a
-# later substituted set while the cache still holds entries built from it;
-# an `id`-only comparison has no such guarantee once the mapping it named is
-# freed.
-_root_cache: dict[str, tuple[dict[str, Any], str]] = {}
-_root_cache_docs: dict[str, dict[str, Any]] | None = None
-
-
-def _resolve_root(doc_name: str) -> tuple[dict[str, Any], str]:
+def _resolve_root(doc_name: str, schema: BattinfoSchema | None = None) -> tuple[dict[str, Any], str]:
     """Resolve one BattINFO entity's root schema node.
-
-    The root documents never change at runtime, so the result is
-    cached. A caller that substitutes `BATTINFO_SCHEMA` replaces its `docs`
-    mapping outright, so a fresh `docs` mapping (`is` compared against the
-    one the cache was filled from) clears the cache before it resolves.
 
     Args:
         doc_name: The bundle-relative document naming the entity's root node.
+        schema: The set to resolve it in. Defaults to `BATTINFO_SCHEMA`.
 
     Returns:
         The resolved root node, and the `$id` it resolved against.
     """
-    global _root_cache_docs
-    if BATTINFO_SCHEMA.docs is not _root_cache_docs:
-        _root_cache.clear()
-        _root_cache_docs = BATTINFO_SCHEMA.docs
-    cached = _root_cache.get(doc_name)
-    if cached is None:
-        doc = BATTINFO_SCHEMA.docs[doc_name]
-        cached = BATTINFO_SCHEMA.resolve(doc, doc["$id"])
-        _root_cache[doc_name] = cached
-    return cached
+    return (schema or BATTINFO_SCHEMA).root(doc_name)
 
 
-def _root_record(doc_name: str, data: dict[str, Any] | None = None) -> Record:
+def _root_record(doc_name: str, data: dict[str, Any] | None = None, schema: BattinfoSchema | None = None) -> Record:
     """Build a `Record` bounded by one BattINFO entity's root schema node.
 
     Args:
         doc_name: The bundle-relative document naming the entity's root node.
         data: The backing dictionary the record reads and writes, or an
             empty one where nothing was set.
+        schema: The set the record is bounded by. Defaults to `BATTINFO_SCHEMA`.
 
     Returns:
         A record bounded by the document's root node, over `data`.
     """
-    node, base_id = _resolve_root(doc_name)
-    return Record(BATTINFO_SCHEMA, node, base_id, data if data is not None else {}, path="")
+    schema = schema or BATTINFO_SCHEMA
+    node, base_id = _resolve_root(doc_name, schema)
+    return Record(schema, node, base_id, data if data is not None else {}, path="")
+
+
+BATTINFO_SCHEMA_CONTEXT = "battinfo_schema"
+"""Validation context key naming the `BattinfoSchema` the entity records are
+checked against and bounded by. Without it, `BATTINFO_SCHEMA` serves."""
+
+BATTINFO_REFUSALS_CONTEXT = "battinfo_refusals"
+"""Validation context key holding a list. Where it is given, a value the
+schema refuses is appended to it, one message per refusal, and the record is
+kept as it is, rather than failing validation."""
+
+
+def _context_schema(info: ValidationInfo) -> BattinfoSchema:
+    """Return the schema set a validation context names, or `BATTINFO_SCHEMA`.
+
+    Args:
+        info: The validation info pydantic passes a field validator.
+
+    Returns:
+        The set under `BATTINFO_SCHEMA_CONTEXT`, where the context names one.
+    """
+    context = info.context if isinstance(info.context, dict) else {}
+    schema = context.get(BATTINFO_SCHEMA_CONTEXT)
+    return schema if isinstance(schema, BattinfoSchema) else BATTINFO_SCHEMA
+
+
+def _context_refusals(info: ValidationInfo) -> list[str] | None:
+    """Return the list a validation context collects refusals in, if it gives one.
+
+    Args:
+        info: The validation info pydantic passes a field validator.
+
+    Returns:
+        The list under `BATTINFO_REFUSALS_CONTEXT`, or ``None`` where a
+        refusal fails validation.
+    """
+    context = info.context if isinstance(info.context, dict) else {}
+    refusals = context.get(BATTINFO_REFUSALS_CONTEXT)
+    return refusals if isinstance(refusals, list) else None
 
 
 def _entity_field(name: str) -> Any:
@@ -116,9 +137,12 @@ class EntityRecord:
 
     The marker gives the field its pydantic behaviour, in python and in JSON
     mode alike. A mapping is coerced (see :mod:`bdf.battinfo.record`),
-    validated against the loaded schema, and built into a record; a record
-    passes through once it validates. Every refused value is its own
-    validation error, located at the value (``battinfo_test.test.started_at``).
+    validated against the schema set the validation context names
+    (`BATTINFO_SCHEMA_CONTEXT`, `BATTINFO_SCHEMA` without one), and built
+    into a record bounded by that set; a record passes through once it
+    validates against the set it is bounded by. Every refused value is its own
+    validation error, located at the value (``battinfo_test.test.started_at``),
+    unless the context collects refusals (`BATTINFO_REFUSALS_CONTEXT`).
     A record serialises through `Record.to_dict`, and the field's JSON Schema
     is the loaded BattINFO root node.
 
@@ -128,19 +152,29 @@ class EntityRecord:
 
     name: str
 
-    def _refuse(self, data: dict[str, Any]) -> None:
-        """Raise one validation error per value the loaded schema refuses.
+    def _refuse(self, data: dict[str, Any], schema: BattinfoSchema, collected: list[str] | None = None) -> None:
+        """Report every value a schema set refuses: raise, or collect them.
 
         Args:
             data: The record's data. A stated null is unset rather than
                 refused, so the pruned form is what validates.
+            schema: The set to check the data against.
+            collected: Where given, each refusal is appended to it as a
+                message naming the field and the set's version, and nothing
+                is raised.
 
         Raises:
-            ValidationError: The loaded schema refuses a value.
+            ValidationError: The set refuses a value, and ``collected`` is
+                ``None``.
         """
-        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
-        validator = jsonschema.Draft202012Validator(_absolute_refs(node, base_id), registry=BATTINFO_SCHEMA._registry)
-        version = BATTINFO_SCHEMA.version or "unversioned"
+        node, base_id = _resolve_root(_ENTITY_DOCS[self.name], schema)
+        validator = jsonschema.Draft202012Validator(_absolute_refs(node, base_id), registry=schema._registry)
+        version = schema.version or "unversioned"
+        if collected is not None:
+            for error in validator.iter_errors(data):
+                where = ".".join(str(part) for part in (self.name, *error.absolute_path))
+                collected.append(f"BattINFO schema {version} refuses {where}: {error.message}")
+            return
         errors = [
             InitErrorDetails(
                 type=PydanticCustomError(
@@ -156,34 +190,41 @@ class EntityRecord:
         if errors:
             raise ValidationError.from_exception_data(self.name, errors)
 
-    def _build(self, value: Mapping[str, Any]) -> Record:
+    def _build(self, value: Mapping[str, Any], info: ValidationInfo) -> Record:
         """Coerce and validate a mapping, and build the field's record over it.
 
         Args:
             value: A mapping in the entity's own BattINFO shape.
+            info: The validation info, whose context may name the schema set
+                and collect refusals.
 
         Returns:
-            A record bounded by the field's entity, over the coerced copy.
+            A record bounded by the field's entity in the context's set, over
+            the coerced copy.
         """
-        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
-        data = _coerce(BATTINFO_SCHEMA, node, base_id, dict(value))
-        record = _root_record(_ENTITY_DOCS[self.name], data)
-        self._refuse(record.to_dict())
+        schema = _context_schema(info)
+        node, base_id = _resolve_root(_ENTITY_DOCS[self.name], schema)
+        data = _coerce(schema, node, base_id, dict(value))
+        record = _root_record(_ENTITY_DOCS[self.name], data, schema)
+        self._refuse(record.to_dict(), schema, _context_refusals(info))
         return record
 
-    def _accept(self, value: Any) -> Record:
+    def _accept(self, value: Any, info: ValidationInfo) -> Record:
         """Accept a record once it validates, or build one from a mapping.
 
         Args:
             value: A `Record`, or a mapping in the entity's own BattINFO shape.
+            info: The validation info, whose context may name the schema set
+                and collect refusals.
 
         Returns:
-            The record.
+            The record. A record passed in keeps the set it is bounded by,
+            and is checked against that set.
         """
         if isinstance(value, Record):
-            self._refuse(value.to_dict())
+            self._refuse(value.to_dict(), value._schema, _context_refusals(info))
             return value
-        return self._build(_MAPPING.validate_python(value))
+        return self._build(_MAPPING.validate_python(value), info)
 
     def __get_pydantic_core_schema__(self, source: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
         """Give the field its validator and its serialiser.
@@ -198,9 +239,9 @@ class EntityRecord:
         """
         return core_schema.json_or_python_schema(
             json_schema=core_schema.chain_schema(
-                [core_schema.dict_schema(), core_schema.no_info_plain_validator_function(self._build)]
+                [core_schema.dict_schema(), core_schema.with_info_plain_validator_function(self._build)]
             ),
-            python_schema=core_schema.no_info_plain_validator_function(self._accept),
+            python_schema=core_schema.with_info_plain_validator_function(self._accept),
             serialization=core_schema.plain_serializer_function_ser_schema(
                 lambda record: record.to_dict(),
                 return_schema=core_schema.dict_schema(),
@@ -318,6 +359,32 @@ class Metadata(_RecordModel):
     key no rule maps is preserved by ``raw`` instead. It never holds a failed
     value, because such a value raises. ``None`` when a read staged nothing
     here. Written by `save()` and restored on a later read."""
+
+    _battinfo_unchecked: bool = PrivateAttr(default=False)
+    # Set by a sidecar read whose records the BattINFO set they are bounded by
+    # refused, kept as they were: the records then follow `bdf.battinfo_version`,
+    # the release the sidecar stated, rather than the set that refused them.
+
+    def _battinfo_stamp(self) -> str | None:
+        """Return the BattINFO release a sidecar written from this metadata states.
+
+        A record follows the release of the set it is bounded by, so the
+        stamp is that release. A sidecar read whose records the set refused
+        keeps the release the sidecar stated instead, because those records
+        were never shown to follow the set they are bounded by.
+
+        Returns:
+            The release the records follow. ``None`` where records bounded by
+            different releases hold values, where the set holding them names
+            no release, or where a refused read stated none.
+        """
+        if self._battinfo_unchecked:
+            return self.bdf.battinfo_version
+        records = [getattr(self, name) for name in _ENTITY_DOCS]
+        versions = {record._schema.version for record in records if record.to_dict()}
+        if not versions:
+            return BATTINFO_SCHEMA.version
+        return versions.pop() if len(versions) == 1 else None
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

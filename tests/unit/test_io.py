@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from bdf import (
     BDFMetadataError,
+    BDFMetadataWarning,
     BdfReadInfo,
     BDFValidationError,
     Metadata,
@@ -1221,7 +1222,16 @@ def test_unrecognised_sidecar_key_fails_the_read(tmp_path: Path) -> None:
     with pytest.raises(BDFMetadataError, match="not_a_real_field"):
         io.read(p)
 
-    sidecar.write_text(json.dumps({"battinfo_test": {"test": {"started_at": "not-an-int"}}}))
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    sidecar.write_text(
+        json.dumps(
+            {
+                "battinfo_test": {"test": {"started_at": "not-an-int"}},
+                "bdf": {"battinfo_version": BATTINFO_SCHEMA.version},
+            }
+        )
+    )
     with pytest.raises(BDFMetadataError):
         io.read(p)
 
@@ -1421,3 +1431,212 @@ def test_empty_metadata_is_not_stamped_into_existence(tmp_path: Path) -> None:
     io.save(df, p, metadata=Metadata())
 
     assert not p.with_suffix(".metadata.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# A sidecar's BattINFO records are checked against the release it states (#130)
+# ---------------------------------------------------------------------------
+
+_TABLE = {"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]}
+
+
+@pytest.fixture
+def battinfo_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty release cache, and no release loaded or refused yet in this process.
+
+    Returns:
+        The cache directory ``BattinfoSchema.for_version`` reads and fetches into.
+    """
+    from bdf.battinfo import schema
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("BDF_CACHE_DIR", str(cache))
+    monkeypatch.setattr(schema, "_RELEASES", {})
+    monkeypatch.setattr(schema, "_UNAVAILABLE", {})
+    return cache
+
+
+def _cache_release(cache: Path, version: str) -> None:
+    """Write a release into the cache: the bundled documents, with ``rig_bay`` declared on a test.
+
+    Args:
+        cache: The ``BDF_CACHE_DIR`` directory.
+        version: The release the snapshot's ``VERSION`` names.
+    """
+    import shutil
+
+    from bdf.battinfo.schema import bundled_schema_dir
+
+    snapshot = cache / f"battinfo-v{version}"
+    shutil.copytree(bundled_schema_dir(), snapshot / "schemas")
+    test_doc = snapshot / "schemas" / "test.schema.json"
+    doc = json.loads(test_doc.read_text(encoding="utf-8"))
+    doc["properties"]["rig_bay"] = {"type": "string"}
+    test_doc.write_text(json.dumps(doc), encoding="utf-8")
+    (snapshot / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+
+
+def _write_with_sidecar(tmp_path: Path, name: str, sidecar: dict) -> Path:
+    """Write a BDF table, and a sidecar beside it holding ``sidecar``."""
+    p = tmp_path / f"{name}.bdf.csv"
+    pl.DataFrame(_TABLE).write_csv(p)
+    p.with_suffix(".metadata.json").write_text(json.dumps(sidecar), encoding="utf-8")
+    return p
+
+
+def _stamp(p: Path) -> str | None:
+    """Return the battinfo_version a written sidecar states."""
+    return json.loads(p.with_suffix(".metadata.json").read_text(encoding="utf-8"))["bdf"].get("battinfo_version")
+
+
+def test_a_value_the_stated_release_refuses_fails_the_read(tmp_path: Path) -> None:
+    """A sidecar stating the loaded release, holding a value it refuses, fails the
+    read, and the message names the lenient way out."""
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    p = _write_with_sidecar(
+        tmp_path,
+        "data",
+        {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": BATTINFO_SCHEMA.version}},
+    )
+    with pytest.raises(BDFMetadataError, match="battinfo='lenient'"):
+        io.read(p)
+
+
+def test_lenient_keeps_a_value_the_stated_release_refuses(tmp_path: Path) -> None:
+    """battinfo='lenient' keeps a refused value as it is and warns, and a later save
+    keeps the release the sidecar stated."""
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    p = _write_with_sidecar(
+        tmp_path,
+        "data",
+        {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": BATTINFO_SCHEMA.version}},
+    )
+    with pytest.warns(BDFMetadataWarning, match="rig_bay"):
+        df, meta = io.read(p, battinfo="lenient")
+    assert meta.battinfo_test.to_dict() == {"rig_bay": "B3"}
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) == BATTINFO_SCHEMA.version
+
+
+def test_a_sidecar_stating_no_release_keeps_a_refused_value_and_warns(tmp_path: Path) -> None:
+    """With no release stated, nothing can judge the records: a value the loaded set
+    refuses is kept and warned, and a later save states no release for them."""
+    p = _write_with_sidecar(tmp_path, "data", {"battinfo_test": {"rig_bay": "B3"}})
+    with pytest.warns(BDFMetadataWarning, match="states no BattINFO release"):
+        df, meta = io.read(p)
+    assert meta.battinfo_test.to_dict() == {"rig_bay": "B3"}
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) is None
+
+
+def test_a_valid_sidecar_stating_no_release_is_stamped_with_the_loaded_release(tmp_path: Path) -> None:
+    """Records the loaded set accepts follow it, so a read warns nothing and a later
+    save states the loaded release."""
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    p = _write_with_sidecar(tmp_path, "data", {"battinfo_test": {"test": {"name": "cell-1"}}})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", BDFMetadataWarning)
+        df, meta = io.read(p)
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) == BATTINFO_SCHEMA.version
+
+
+def test_a_cached_release_bounds_the_records_it_states(tmp_path: Path, battinfo_cache: Path) -> None:
+    """A sidecar stating a cached release other than the loaded one is checked
+    against that release, its records are bounded by it, and a save keeps it."""
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    _cache_release(battinfo_cache, "0.7.0")
+    p = _write_with_sidecar(
+        tmp_path, "data", {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": "0.7.0"}}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", BDFMetadataWarning)
+        df, meta = io.read(p)
+    assert meta.battinfo_test.rig_bay == "B3"
+    assert BATTINFO_SCHEMA.version == "0.8.0rc2"
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) == "0.7.0"
+
+
+def test_a_value_a_cached_release_refuses_fails_the_read(tmp_path: Path, battinfo_cache: Path) -> None:
+    """A loadable release that refuses a value fails the read, as the loaded one does."""
+    _cache_release(battinfo_cache, "0.7.0")
+    p = _write_with_sidecar(tmp_path, "data", {"battinfo_test": {"rig_bay": 3}, "bdf": {"battinfo_version": "0.7.0"}})
+    with pytest.raises(BDFMetadataError, match="BattINFO schema 0.7.0 refuses"):
+        io.read(p)
+
+
+def test_an_unloadable_release_keeps_the_records_and_their_stamp(
+    tmp_path: Path, battinfo_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release that cannot be loaded leaves the records unjudged: a value the loaded
+    set refuses is kept and warned, and a save keeps the release the sidecar stated."""
+    monkeypatch.setenv("BDF_BATTINFO_FETCH", "0")
+    p = _write_with_sidecar(
+        tmp_path, "data", {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": "9.0.0"}}
+    )
+    with pytest.warns(BDFMetadataWarning, match="9.0.0 is not cached, and fetching it is off"):
+        df, meta = io.read(p)
+    assert meta.battinfo_test.to_dict() == {"rig_bay": "B3"}
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) == "9.0.0"
+
+
+def test_a_release_is_fetched_once_and_a_failed_fetch_is_not_retried(
+    tmp_path: Path, battinfo_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release neither bundled nor cached is fetched into the cache, once per process;
+    a release that fails to fetch is not fetched again."""
+    from bdf.battinfo.schema import READ_FETCH_TIMEOUT, BattinfoSchema
+
+    fetched: list[tuple[str, float]] = []
+
+    def fake_get_snapshot(version: str, dest: Path, *, timeout: float) -> Path:
+        fetched.append((version, timeout))
+        if version == "9.0.0":
+            raise ConnectionError("no network")
+        _cache_release(battinfo_cache, version)
+        return dest
+
+    monkeypatch.setattr(BattinfoSchema, "get_snapshot", staticmethod(fake_get_snapshot))
+    good = {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": "0.7.0"}}
+    bad = {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": "9.0.0"}}
+    for i in range(2):
+        io.read(_write_with_sidecar(tmp_path, f"good{i}", good))
+        with pytest.warns(BDFMetadataWarning, match="could not be fetched: no network"):
+            io.read(_write_with_sidecar(tmp_path, f"bad{i}", bad))
+
+    assert fetched == [("0.7.0", READ_FETCH_TIMEOUT), ("9.0.0", READ_FETCH_TIMEOUT)]
+
+
+def test_a_record_assigned_from_another_release_keeps_its_release(tmp_path: Path, battinfo_cache: Path) -> None:
+    """A record keeps the set it is bounded by when assigned to other metadata, and
+    metadata whose records follow different releases states none on save."""
+    _cache_release(battinfo_cache, "0.7.0")
+    p = _write_with_sidecar(
+        tmp_path, "data", {"battinfo_test": {"rig_bay": "B3"}, "bdf": {"battinfo_version": "0.7.0"}}
+    )
+    df, read_meta = io.read(p)
+
+    meta = Metadata()
+    meta.battinfo_cell.cell_instance.name = "cell-1"  # type: ignore[union-attr]
+    meta.battinfo_test = read_meta.battinfo_test
+    assert meta.battinfo_test.rig_bay == "B3"
+
+    out = tmp_path / "out.bdf.csv"
+    io.save(df, out, metadata=meta)
+    assert _stamp(out) is None

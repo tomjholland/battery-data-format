@@ -29,9 +29,16 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError, model_validator
 
-from ._errors import BDFMetadataError
+from ._errors import BDFMetadataError, BDFMetadataWarning
+from .battinfo.schema import (
+    BATTINFO_SCHEMA,
+    READ_FETCH_TIMEOUT,
+    BattinfoSchema,
+    SchemaError,
+    fetch_enabled,
+)
 from .file_utils import read_head
-from .metadata import Metadata
+from .metadata import BATTINFO_REFUSALS_CONTEXT, BATTINFO_SCHEMA_CONTEXT, Metadata
 from .metadata_targets import ExtrasTarget, MetadataTarget
 from .normalization import (
     AbsoluteTimeNormalization,
@@ -595,6 +602,35 @@ class JsonSidecarParser(MetadataParser):
         return Metadata.model_validate(document)
 
 
+def _battinfo_schema_for(stated: Any) -> tuple[BattinfoSchema, str | None]:
+    """Choose the BattINFO set a sidecar's records are checked against.
+
+    The release the sidecar states is the set its writer bounded the records
+    by, so it is the set that can judge them: :data:`BATTINFO_SCHEMA` where
+    that is the release loaded, the release itself otherwise
+    (:meth:`BattinfoSchema.for_version`, fetching it where it is neither
+    bundled nor cached and :func:`fetch_enabled` allows). A sidecar that
+    states no release, or states one that cannot be loaded, falls back to
+    :data:`BATTINFO_SCHEMA`, a set that cannot judge the records.
+
+    Args:
+        stated: The sidecar's ``bdf.battinfo_version``, as the document holds it.
+
+    Returns:
+        The set to check against, and ``None`` where it is the stated
+        release, or the reason it is not.
+    """
+    if not isinstance(stated, str) or not stated.strip():
+        return BATTINFO_SCHEMA, "the sidecar states no BattINFO release"
+    release = stated.strip().removeprefix("v")
+    if BATTINFO_SCHEMA.version == release:
+        return BATTINFO_SCHEMA, None
+    try:
+        return BattinfoSchema.for_version(release, fetch=fetch_enabled(), timeout=READ_FETCH_TIMEOUT), None
+    except (SchemaError, ValueError) as exc:
+        return BATTINFO_SCHEMA, f"the BattINFO release the sidecar states could not be loaded: {exc}"
+
+
 class BdfSidecarParser(MetadataParser):
     """Restores the BDF-owned ``.metadata.json`` sidecar a prior ``save()`` wrote.
 
@@ -609,11 +645,23 @@ class BdfSidecarParser(MetadataParser):
     upgrade instruction (GH #106). A sidecar that exists and cannot be read at all raises
     :class:`BDFMetadataError`, so an empty ``Metadata`` always means that no
     sidecar exists.
+
+    The BattINFO records are checked against the release the sidecar states
+    in ``bdf.battinfo_version`` (see :func:`_battinfo_schema_for`), and are
+    bounded by it. A value that release refuses raises, because the sidecar
+    breaks the schema it states. Where the release cannot be loaded, or the
+    sidecar states none, the records are checked against the loaded set,
+    which cannot judge them, so a value it refuses is kept as it is and
+    warned with :class:`BDFMetadataWarning`; such metadata keeps the stated
+    release as its stamp when it is saved again.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["bdf_sidecar"] = "bdf_sidecar"  # type: ignore[assignment]
+    battinfo: Literal["strict", "lenient"] = "strict"
+    """``"strict"`` raises on a BattINFO value the release the sidecar states
+    refuses. ``"lenient"`` keeps it as it is, and warns."""
 
     def sidecar_path(self, path: str | Path) -> Path:
         """Return the reserved BDF sidecar path for a data file.
@@ -665,13 +713,30 @@ class BdfSidecarParser(MetadataParser):
                 ``Metadata`` field declares, or a recognised field an invalid
                 value. Where the document also claims a newer ``bdf_version``
                 than the installed package, the message says to upgrade.
+            BDFMetadataError: The BattINFO release the sidecar states refuses
+                a value of its records, and ``battinfo`` is ``"strict"``.
+
+        Warns:
+            BDFMetadataWarning: The records hold values the schema refuses,
+                kept as they are, because the stated release could not be
+                loaded, the sidecar states none, or ``battinfo`` is
+                ``"lenient"``.
         """
         sidecar = self.sidecar_path(path)
         if not sidecar.exists():
             return Metadata()
         data = _load_json_object(sidecar)
+        bdf_block = data.get("bdf")
+        stated = bdf_block.get("battinfo_version") if isinstance(bdf_block, dict) else None
+        schema, fallback = _battinfo_schema_for(stated)
+        if fallback is None and self.battinfo == "lenient":
+            fallback = "battinfo='lenient' was asked for"
+        refusals: list[str] = []
+        context: dict[str, Any] = {BATTINFO_SCHEMA_CONTEXT: schema}
+        if fallback is not None:
+            context[BATTINFO_REFUSALS_CONTEXT] = refusals
         try:
-            return Metadata.model_validate(data)
+            metadata = Metadata.model_validate(data, context=context)
         except PydanticValidationError as exc:
             import bdf
 
@@ -684,4 +749,16 @@ class BdfSidecarParser(MetadataParser):
                     f"metadata sidecar {sidecar} was written by bdf {claimed}; this is bdf "
                     f"{bdf.__version__}. Upgrade batterydf to read it."
                 ) from exc
-            raise BDFMetadataError(f"metadata sidecar {sidecar} does not validate: {exc}") from exc
+            hint = ""
+            if any(error["type"] == "battinfo_schema" for error in exc.errors()):
+                hint = " Pass battinfo='lenient' to read it anyway, keeping each refused value as it is."
+            raise BDFMetadataError(f"metadata sidecar {sidecar} does not validate: {exc}{hint}") from exc
+        if refusals:
+            warnings.warn(
+                f"metadata sidecar {sidecar}: kept {len(refusals)} BattINFO value(s) the schema refuses, "
+                f"because {fallback}:\n  " + "\n  ".join(refusals),
+                BDFMetadataWarning,
+                stacklevel=2,
+            )
+            metadata._battinfo_unchecked = True
+        return metadata

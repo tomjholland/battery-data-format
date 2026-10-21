@@ -7,3 +7,7 @@ class BDFValidationError(Exception):
 
 class BDFMetadataError(Exception):
     """Raised when a metadata sidecar exists and cannot be restored."""
+
+
+class BDFMetadataWarning(UserWarning):
+    """Warned when a metadata sidecar is restored with values its BattINFO schema could not check, or refused."""

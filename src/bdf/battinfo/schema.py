@@ -11,13 +11,16 @@ BattINFO release, as the bundled ontology is a snapshot of one ontology
 release: ``schemas/`` holds the documents, and ``VERSION`` names the release.
 :meth:`BattinfoSchema.get_snapshot` fetches a release and writes it in that
 layout, to the bundle or to the cache :meth:`BattinfoSchema.load_version`
-reads.
+reads. :meth:`BattinfoSchema.for_version` returns one release's set without
+adopting it, so a sidecar is checked against the release its writer stamped
+while :data:`BATTINFO_SCHEMA` stays as the caller left it.
 """
 
 from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -43,6 +46,12 @@ MANAGED_SCHEMAS = (
 
 _RELEASE_URL_TMPL = "https://raw.githubusercontent.com/BIG-MAP/BattINFO/v{version}/assets/schemas/{path}"
 """The raw upstream URL of one schema document at one release tag."""
+
+FETCH_ENV = "BDF_BATTINFO_FETCH"
+"""Environment variable that turns off fetching a release a sidecar names, when set to ``0``, ``false``, ``no``, or ``off``."""
+
+READ_FETCH_TIMEOUT = 5.0
+"""Seconds one document fetch may take when a read fetches the release a sidecar names."""
 
 MAX_REFERENCE_LINKS = 20
 """How many ``$ref`` links one resolution follows before it refuses the chain."""
@@ -158,6 +167,7 @@ class BattinfoSchema:
                 raise ValueError(f"BattINFO schema document {name} declares no $id")
             self.docs[name] = _strip_required(doc)
         self._registry: Registry[Any] = _registry_for(self.docs)
+        self._roots: dict[str, tuple[dict[str, Any], str]] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Return the state to pickle: everything but the reference registry.
@@ -166,10 +176,11 @@ class BattinfoSchema:
         from the documents alone.
 
         Returns:
-            The instance's attributes, without ``_registry``.
+            The instance's attributes, without ``_registry`` or the root cache.
         """
         state = self.__dict__.copy()
         del state["_registry"]
+        del state["_roots"]
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -180,6 +191,24 @@ class BattinfoSchema:
         """
         self.__dict__.update(state)
         self._registry = _registry_for(self.docs)
+        self._roots = {}
+
+    def root(self, doc_name: str) -> tuple[dict[str, Any], str]:
+        """Resolve one document's root node, cached for the set.
+
+        Args:
+            doc_name: The bundle-relative document name, e.g.
+                ``"test.schema.json"``.
+
+        Returns:
+            The resolved root node, and the ``$id`` it resolved against.
+        """
+        cached = self._roots.get(doc_name)
+        if cached is None:
+            doc = self.docs[doc_name]
+            cached = self.resolve(doc, doc["$id"])
+            self._roots[doc_name] = cached
+        return cached
 
     def resolve(self, node: dict[str, Any], base_id: str) -> tuple[dict[str, Any], str]:
         """Follow a ``$ref`` chain and combine the combinators into one node.
@@ -302,6 +331,7 @@ class BattinfoSchema:
         self.version = other.version
         self.docs = other.docs
         self._registry = other._registry
+        self._roots = {}
 
     @classmethod
     def from_snapshot(cls, path: Path | str) -> "BattinfoSchema":
@@ -318,14 +348,10 @@ class BattinfoSchema:
             ValueError: A document declares no ``$id``.
         """
         root = Path(path)
-        try:
-            version = (root / "VERSION").read_text(encoding="utf-8").strip() or None
-        except OSError:
-            version = None
-        return cls(load_docs(root / "schemas"), version=version)
+        return cls(load_docs(root / "schemas"), version=_snapshot_version(root))
 
     @classmethod
-    def get_snapshot(cls, version: str, dest: Path | str | None = None) -> Path:
+    def get_snapshot(cls, version: str, dest: Path | str | None = None, *, timeout: float = 30.0) -> Path:
         """Fetch one upstream BattINFO release and write it as a snapshot.
 
         Each document is written with sorted keys and a two-space indent, the
@@ -339,6 +365,7 @@ class BattinfoSchema:
                 ``v``, as the upstream tag carries, is accepted.
             dest: The snapshot directory to write. Defaults to the bundled
                 package-data directory.
+            timeout: Seconds one document fetch may take.
 
         Returns:
             The snapshot directory written to.
@@ -355,7 +382,7 @@ class BattinfoSchema:
         documents: dict[str, bytes] = {}
         for name in MANAGED_SCHEMAS:
             url = _RELEASE_URL_TMPL.format(version=version, path=name)
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=timeout)
             response.raise_for_status()
             try:
                 doc = json.loads(response.content)
@@ -408,12 +435,112 @@ class BattinfoSchema:
                 upstream has not released.
             SchemaError: A document does not parse.
         """
-        from bdf.fetch import cache_dir
-
-        cached = cache_dir() / f"battinfo-v{version.removeprefix('v')}"
+        version = version.removeprefix("v")
+        cached = _release_cache_dir(version)
         if refresh or not (cached / "VERSION").is_file():
             self.get_snapshot(version, dest=cached)
+            _RELEASES.pop(version, None)
+            _UNAVAILABLE.pop(version, None)
         self._adopt(self.from_snapshot(cached))
+
+    @classmethod
+    def for_version(cls, version: str, *, fetch: bool = True, timeout: float = 30.0) -> "BattinfoSchema":
+        """Return one upstream BattINFO release's set, without adopting it.
+
+        The bundled snapshot serves its own release with no network access,
+        and the cache :meth:`load_version` writes serves any release fetched
+        before. A release found nowhere is fetched into that cache. Each
+        release loads once per process, and a release that failed to fetch
+        is not fetched again, so a read of many files written at one
+        unreachable release waits on one fetch alone.
+
+        Args:
+            version: The release, e.g. ``"0.8.0rc2"``. A leading ``v`` is
+                accepted.
+            fetch: If False, a release neither bundled nor cached is not
+                fetched, and raises.
+            timeout: Seconds one document fetch may take.
+
+        Returns:
+            The release's loaded set. It is shared by every caller asking for
+            the release, so a caller must not substitute it in place.
+
+        Raises:
+            SchemaError: The release is neither bundled nor cached and
+                ``fetch`` is False, it failed to fetch (now or earlier in the
+                process), or a document does not parse.
+            ValueError: A document declares no ``$id``.
+        """
+        version = version.removeprefix("v")
+        loaded = _RELEASES.get(version)
+        if loaded is not None:
+            return loaded
+        if version in _UNAVAILABLE:
+            raise SchemaError(_UNAVAILABLE[version])
+        snapshot = bundled_snapshot_dir()
+        if _snapshot_version(snapshot) != version:
+            snapshot = _release_cache_dir(version)
+            if not (snapshot / "VERSION").is_file():
+                if not fetch:
+                    raise SchemaError(f"BattINFO release {version} is not cached, and fetching it is off")
+                try:
+                    cls.get_snapshot(version, dest=snapshot, timeout=timeout)
+                # Whatever stops the fetch (no network, a socket a sandbox
+                # blocks, a release upstream never published, a document
+                # that does not parse), the release cannot be loaded.
+                except Exception as exc:
+                    reason = f"BattINFO release {version} could not be fetched: {exc}"
+                    _UNAVAILABLE[version] = reason
+                    raise SchemaError(reason) from exc
+        loaded = cls.from_snapshot(snapshot)
+        _RELEASES[version] = loaded
+        return loaded
+
+
+_RELEASES: dict[str, BattinfoSchema] = {}
+"""The releases :meth:`BattinfoSchema.for_version` has loaded in this process, by release."""
+
+_UNAVAILABLE: dict[str, str] = {}
+"""The releases that failed to fetch in this process, each with the reason it failed."""
+
+
+def _release_cache_dir(version: str) -> Path:
+    """Return the cache directory one fetched release is written to.
+
+    Args:
+        version: The release, with no leading ``v``.
+
+    Returns:
+        The snapshot directory under ``BDF_CACHE_DIR``.
+    """
+    from bdf.fetch import cache_dir
+
+    return cache_dir() / f"battinfo-v{version}"
+
+
+def _snapshot_version(path: Path) -> str | None:
+    """Return the release a snapshot directory's ``VERSION`` names.
+
+    Args:
+        path: The snapshot directory.
+
+    Returns:
+        The release, or ``None`` where the directory names none.
+    """
+    try:
+        return (path / "VERSION").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def fetch_enabled() -> bool:
+    """Report whether a read may fetch the BattINFO release a sidecar names.
+
+    Returns:
+        ``False`` where :data:`FETCH_ENV` is set to ``0``, ``false``, ``no``,
+        or ``off``, and ``True`` otherwise.
+    """
+    return os.getenv(FETCH_ENV, "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def bundled_snapshot_dir() -> Path:
