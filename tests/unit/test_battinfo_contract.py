@@ -155,6 +155,66 @@ def test_load_version_caches_the_release_and_refresh_refetches(tmp_path: Path, m
     assert second.call_count == len(MANAGED_SCHEMAS)
 
 
+@pytest.fixture
+def no_releases_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty release cache, and no release loaded or refused yet in this process."""
+    import bdf.battinfo.schema as schema_module
+
+    monkeypatch.setenv("BDF_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(schema_module, "_RELEASES", {})
+    monkeypatch.setattr(schema_module, "_UNAVAILABLE", {})
+    return tmp_path
+
+
+def test_for_version_serves_the_bundled_release_with_no_network(no_releases_loaded: Path) -> None:
+    """The bundled release loads from the bundle, with fetching off."""
+    bundled = load_bundled().version
+    assert bundled is not None
+    with patch("requests.get") as get:
+        schema = BattinfoSchema.for_version(f"v{bundled}", fetch=False)
+    get.assert_not_called()
+    assert schema.version == bundled
+
+
+def test_for_version_fetches_a_release_once_and_adopts_nothing(no_releases_loaded: Path) -> None:
+    """A release neither bundled nor cached is fetched into the cache, loaded once
+    per process, and the loaded set stays as it was."""
+    from bdf.battinfo.schema import BATTINFO_SCHEMA
+
+    before = BATTINFO_SCHEMA.version
+    with patch("requests.get", _upstream()) as get:
+        first = BattinfoSchema.for_version("0.8.0")
+        again = BattinfoSchema.for_version("0.8.0")
+    assert get.call_count == len(MANAGED_SCHEMAS)
+    assert first is again
+    assert first.version == "0.8.0"
+    assert (no_releases_loaded / "battinfo-v0.8.0" / "VERSION").is_file()
+    assert BATTINFO_SCHEMA.version == before
+
+
+def test_for_version_refuses_an_uncached_release_with_fetching_off(no_releases_loaded: Path) -> None:
+    """With fetching off, a release neither bundled nor cached raises, fetching nothing."""
+    with patch("requests.get") as get, pytest.raises(SchemaError, match="not cached"):
+        BattinfoSchema.for_version("0.8.0", fetch=False)
+    get.assert_not_called()
+
+
+def test_for_version_remembers_a_failed_fetch(no_releases_loaded: Path) -> None:
+    """A release that failed to fetch raises again without a second fetch, and
+    ``load_version(refresh=True)`` clears the failure."""
+    with patch("requests.get", _upstream(fail_on="dataset.schema.json")) as get:
+        with pytest.raises(SchemaError, match="could not be fetched"):
+            BattinfoSchema.for_version("0.8.0")
+        calls = get.call_count
+        with pytest.raises(SchemaError, match="could not be fetched"):
+            BattinfoSchema.for_version("0.8.0")
+    assert get.call_count == calls
+
+    with patch("requests.get", _upstream()):
+        load_bundled().load_version("0.8.0", refresh=True)
+        assert BattinfoSchema.for_version("0.8.0").version == "0.8.0"
+
+
 def test_update_cli_writes_the_bundle_for_the_named_release() -> None:
     """``bdf-update-battinfo VERSION`` writes the bundled snapshot for that
     release, and needs the release named."""

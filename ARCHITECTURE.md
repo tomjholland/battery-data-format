@@ -49,6 +49,15 @@ typed `Metadata` object assembled from exactly one source: the artifact's
 otherwise. `save()` writes the sidecar and refuses ambiguous overwrites, so a
 sidecar always describes the last save.
 
+A sidecar names the BattINFO release its records follow, and a read checks
+them against that release, loaded beside the user's set rather than in place
+of it. A value the named release refuses raises, because the file breaks the
+schema it names. Where the release cannot be loaded, or the file names none,
+nothing can judge the records, so a refused value is kept and warned, and the
+next save keeps the release the file named. The top level of `Metadata`
+(the `bdf`, `raw`, and `extras` sections) stays strict: a key it does not
+declare means a newer bdf wrote the file, and the read says to upgrade.
+
 ## Design rules that shape everything
 
 - **The ontology is the single source of truth.** Column meaning lives in the

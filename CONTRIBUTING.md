@@ -102,7 +102,10 @@ managed schema files under `src/bdf/data/battinfo/schemas/` (nine today), and
 of. The bundle pins published releases only. The `Metadata` records are
 bounded by the loaded schema at run time, so no code is generated from these
 files. They are the default set a user can replace
-(`BATTINFO_SCHEMA.load_version`, `load_dir`, as for the BDF ontology).
+(`BATTINFO_SCHEMA.load_version`, `load_dir`, as for the BDF ontology). A read
+checks a sidecar against the release it names (`BattinfoSchema.for_version`),
+so tests that read sidecars naming another release use a release cache under
+`BDF_CACHE_DIR` rather than the network.
 
 - To change a schema, open a PR on the **BattINFO repo**, not here.
 - To move the bundle to another release, run `bdf-update-battinfo VERSION`

@@ -269,3 +269,19 @@ def test_a_loaded_set_and_its_records_pickle() -> None:
     assert again == record
     with pytest.raises(SchemaError):
         again.cell_instance.battery_status = "melted"
+
+
+def test_a_root_is_resolved_once_and_adopting_a_set_clears_it(tmp_path: Path) -> None:
+    """A set caches each document's resolved root, and adopting another set drops
+    the cache, so a root never comes from the documents a set replaced."""
+
+    def declare_rig_bay(docs: dict[str, dict[str, Any]]) -> None:
+        docs["test.schema.json"]["properties"]["rig_bay"] = {"type": "string"}
+
+    schema = load_bundled()
+    root = schema.root("test.schema.json")
+    assert schema.root("test.schema.json") is root
+    assert "rig_bay" not in root[0]["properties"]
+
+    schema._adopt(BattinfoSchema(_substituted_docs(tmp_path, declare_rig_bay)))
+    assert "rig_bay" in schema.root("test.schema.json")[0]["properties"]
