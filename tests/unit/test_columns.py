@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 
 import bdf
-from bdf.columns import ColumnName, can_resolve, parse_name, resolve, select, with_columns
+from bdf.columns import can_resolve, parse_name, resolve, select, with_columns
 from bdf.recipes import RECIPES, Recipe, register_recipe
 from bdf.spec import COLUMN_ONTOLOGY
 
@@ -35,23 +35,24 @@ def cycle() -> pl.DataFrame:
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("Voltage / V", ColumnName("voltage_volt", "V")),
-        ("voltage_volt", ColumnName("voltage_volt", "V")),
-        ("Voltage / mV", ColumnName("voltage_volt", "mV")),
-        ("Net Capacity / mAh", ColumnName("net_capacity_ah", "mAh")),
-        ("net_capacity_ah", ColumnName("net_capacity_ah", "Ah")),
-        ("Test Time / min", ColumnName("test_time_second", "min")),
-        ("Applied Pressure / MPa", ColumnName("applied_pressure_pa", "MPa")),
-        ("Ambient Temperature / K", ColumnName("ambient_temperature_celsius", "K")),
-        ("Ambient Temperature / C", ColumnName("ambient_temperature_celsius", "degC")),
-        ("ambient_temperature_celsius", ColumnName("ambient_temperature_celsius", "degC")),
-        ("step_count", ColumnName("step_count", "1")),
-        ("Step ID", ColumnName("step_id", None)),
-        ("cycle_net_capacity_ah", ColumnName("cycle_net_capacity_ah", "Ah")),
+        ("Voltage / V", ("voltage_volt", "V")),
+        ("voltage_volt", ("voltage_volt", "V")),
+        ("Voltage / mV", ("voltage_volt", "mV")),
+        ("Net Capacity / mAh", ("net_capacity_ah", "mAh")),
+        ("net_capacity_ah", ("net_capacity_ah", "Ah")),
+        ("Test Time / min", ("test_time_second", "min")),
+        ("Applied Pressure / MPa", ("applied_pressure_pa", "MPa")),
+        ("Ambient Temperature / K", ("ambient_temperature_celsius", "K")),
+        ("Ambient Temperature / C", ("ambient_temperature_celsius", "degC")),
+        ("ambient_temperature_celsius", ("ambient_temperature_celsius", "degC")),
+        ("step_count", ("step_count", "1")),
+        ("Step ID", ("step_id", None)),
+        ("cycle_net_capacity_ah", ("cycle_net_capacity_ah", "Ah")),
     ],
 )
-def test_parse_name(name: str, expected: ColumnName) -> None:
-    assert parse_name(name) == expected
+def test_parse_name(name: str, expected: tuple[str, str | None]) -> None:
+    q, unit = parse_name(name)
+    assert (q.mr_name, unit) == expected
 
 
 @pytest.mark.parametrize(
@@ -75,8 +76,8 @@ def test_every_quantity_parses_from_both_label_styles() -> None:
     for mr_name, q in COLUMN_ONTOLOGY:
         if q.deprecated:
             continue
-        assert parse_name(q.formatted_label).quantity == mr_name
-        assert parse_name(q.effective_notation).quantity == mr_name
+        assert parse_name(q.formatted_label)[0].mr_name == mr_name
+        assert parse_name(q.effective_notation)[0].mr_name == mr_name
 
 
 # --------- Resolution ----------
