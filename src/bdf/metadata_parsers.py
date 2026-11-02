@@ -789,7 +789,6 @@ class BdfSidecarParser(MetadataParser):
                 BDFMetadataWarning,
                 stacklevel=2,
             )
-            metadata._battinfo_unchecked = True
         return metadata
 
 

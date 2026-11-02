@@ -16,6 +16,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     ValidationInfo,
+    model_validator,
 )
 from pydantic_core import CoreSchema, InitErrorDetails, PydanticCustomError, core_schema
 
@@ -341,9 +342,28 @@ class Metadata(_RecordModel):
     here. Written by `save()` and restored on a later read."""
 
     _battinfo_unchecked: bool = PrivateAttr(default=False)
-    # Set by a sidecar read whose records the BattINFO set they are bounded by
-    # refused, kept as they were: the records then follow `bdf.battinfo_version`,
-    # the release the sidecar stated, rather than the set that refused them.
+    # Set where validation kept records the BattINFO set they are bounded by
+    # refused (`BATTINFO_REFUSALS_CONTEXT` collected one): the records then
+    # follow `bdf.battinfo_version`, the release the data stated, rather than
+    # the set that refused them.
+
+    @model_validator(mode="after")
+    def _note_kept_refusals(self, info: ValidationInfo) -> "Metadata":
+        """Mark the records unchecked where validation kept a refused value.
+
+        Only ever set, never cleared: an assignment validates with no context,
+        and records kept once stay unchecked.
+
+        Args:
+            info: The validation info, whose context may hold the refusals
+                collected.
+
+        Returns:
+            This instance.
+        """
+        if _context(info)[1]:
+            self._battinfo_unchecked = True
+        return self
 
     def _battinfo_stamp(self) -> str | None:
         """Return the BattINFO release a sidecar written from this metadata states.
