@@ -24,6 +24,7 @@ def _assemble_metadata(
     path: str | Path,
     resolved_plugin: Plugin,
     *,
+    source: str,
     tz: str,
     day_month_order: DayMonthOrder | None = None,
     battinfo: Literal["strict", "lenient"] = "strict",
@@ -34,6 +35,8 @@ def _assemble_metadata(
         path: Local file path or URL being read.
         resolved_plugin: The plugin whose ``metadata_parser`` runs when no
             reserved sidecar sits beside ``path``.
+        source: The plugin id this read resolved, stamped as ``bdf.source``
+            on metadata the plugin parser made.
         tz: IANA timezone forwarded to the plugin's metadata parser.
         day_month_order: Field order forwarded to the plugin's metadata parser.
         battinfo: How the reserved sidecar treats a BattINFO value the
@@ -41,9 +44,10 @@ def _assemble_metadata(
 
     Returns:
         The reserved sidecar's ``Metadata`` where ``<stem>.metadata.json``
-        exists beside ``path``, restored repair records included; the
-        plugin parser's ``Metadata`` otherwise. The caller still assigns
-        ``bdf.source`` and applies this read's own repairs.
+        exists beside ``path``, restored as it is, origin fields included;
+        the plugin parser's ``Metadata`` otherwise, with its origin
+        (``bdf.source`` and ``bdf.created_with``) stamped. The caller still
+        applies this read's own repairs.
 
     Raises:
         BDFMetadataError: A sidecar exists and cannot be restored. An empty
@@ -60,9 +64,14 @@ def _assemble_metadata(
     if resolved_plugin.metadata_parser.uses_preamble_boundary:
         preamble = resolved_plugin.table_parser.preamble(path)
         preamble_lines = None if preamble is None else len(preamble)
-    return resolved_plugin.metadata_parser.parse(
+    metadata = resolved_plugin.metadata_parser.parse(
         path, tz=tz, day_month_order=day_month_order, preamble_lines=preamble_lines
     )
+    import bdf
+
+    metadata.bdf.source = source
+    metadata.bdf.created_with = bdf.__version__
+    return metadata
 
 
 def _read(
@@ -110,6 +119,7 @@ def _read(
     metadata = _assemble_metadata(
         path,
         resolved_plugin,
+        source=plugin_id or "custom",
         tz=tz,
         day_month_order=day_month_order,
         battinfo=battinfo,
@@ -119,8 +129,6 @@ def _read(
         bdf_df, repairs = _reconcile_time_scale(bdf_df, reconcile_time=reconcile_time, strict=validate)
         if repairs:
             metadata.bdf.time_reconciliation = repairs
-
-    metadata.bdf.source = plugin_id or "custom"
 
     return bdf_df, metadata
 
@@ -484,7 +492,11 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
     follow rather than the writer's loaded set, and a sidecar whose records
     follow no one release states none. A stale writer stamp the caller's
     object carries, ``battinfo_ref`` included, is dropped even where this
-    writer states no value for it. The entities are checked first, unless a lenient read kept refused values
+    writer states no value for it. The origin fields (``bdf.source``,
+    ``bdf.created_with``, ``bdf.time_reconciliation``) pass through
+    unchanged, except that metadata no read made, so carrying no
+    ``created_with``, is stamped with this writer's version as its creator.
+    The entities are checked first, unless a lenient read kept refused values
     in them, so a value written into an entity's dict directly never reaches
     the file unchecked. The caller's object is not modified. A ``Metadata`` that carries nothing
     still writes no sidecar: the stamps describe a sidecar, so they never
@@ -501,10 +513,13 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
         raise SchemaError(f"{sidecar} not written: " + "; ".join(refused))
     payload = metadata.model_dump(mode="json", exclude_defaults=True)
     if payload:
+        import bdf
+
         info = payload.setdefault("bdf", {})
         for stale in _WRITER_STAMPS:
             info.pop(stale, None)
         info.update({k: v for k, v in _version_stamps(metadata).items() if v})
+        info.setdefault("created_with", bdf.__version__)
         sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         sidecar.unlink(missing_ok=True)

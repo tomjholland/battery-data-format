@@ -138,16 +138,26 @@ class _RecordModel(BaseModel):
 class BdfReadInfo(_RecordModel):
     """BDF-owned read audit facts, kept out of the BattINFO records.
 
-    The writer stamps (``bdf_version``, ``ontology_version``) describe the
-    sidecar file itself, so ``save()`` overwrites them on every sidecar it
-    writes. ``battinfo_version`` names the release the records follow, so it
-    travels with the records.
+    The fields fall in three groups. The origin fields (``source``,
+    ``created_with``, ``time_reconciliation``) say where the data came from:
+    a read from a non-sidecar source sets them, and every later read and save
+    passes them through unchanged. The writer stamps (``bdf_version``,
+    ``ontology_version``) describe the sidecar file itself, so ``save()``
+    overwrites them on every sidecar it writes. ``battinfo_version`` names the
+    release the records follow, so it travels with the records.
 
     A field an earlier release wrote stays declared, deprecated, so a sidecar
     that release wrote still reads.
     """
 
     source: str | None = None
+    """The plugin that read the source the metadata came from. Set by the
+    read of a non-sidecar source, and passed through by every later read of a
+    sidecar."""
+    created_with: str | None = None
+    """The batterydf package version that first made this metadata: the
+    version that read the non-sidecar source, or, for metadata built by hand,
+    the version that first saved it. Passed through unchanged afterwards."""
     time_reconciliation: list[dict] | None = None
     bdf_version: str | None = None
     """The batterydf package version that wrote this sidecar. Stamped by

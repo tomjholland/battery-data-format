@@ -495,12 +495,15 @@ def test_scan_forwards_all_read_kwargs_to_table_parser(read_mocks: SimpleNamespa
 
 
 def test_read_sets_bdf_source_on_the_parsed_metadata(read_mocks: SimpleNamespace, tmp_path: Path) -> None:
-    """read() calls metadata_parser.parse(path, tz=...) and sets bdf.source on the result."""
+    """read() calls metadata_parser.parse(path, tz=...) and stamps the origin on the result."""
+    import bdf
+
     read_mocks.meta_parse.return_value = Metadata()
     p = tmp_path / "f.csv"
     _, meta = read(p, plugin=read_mocks.plugin)
     read_mocks.meta_parse.assert_called_once_with(p, tz="UTC", day_month_order=None, preamble_lines=None)
     assert meta.bdf.source == "custom"  # type: ignore[attr-defined]
+    assert meta.bdf.created_with == bdf.__version__
 
 
 def test_read_skips_the_preamble_scan_for_a_parser_that_ignores_the_boundary(
@@ -845,8 +848,9 @@ def test_save_metadata(tmp_path: Path) -> None:
     assert p_meta.exists()
     metadata = json.loads(p_meta.read_text())
     assert metadata["bdf"]["source"] == "bdf_parquet"
-    # every written sidecar also carries the writer's version stamps (GH #106)
-    assert set(metadata["bdf"]) == {"source", "bdf_version", "ontology_version", "battinfo_version"}
+    # every written sidecar also carries the writer's version stamps (GH #106),
+    # and metadata no read made is stamped with its creator
+    assert set(metadata["bdf"]) == {"source", "created_with", "bdf_version", "ontology_version", "battinfo_version"}
 
 
 def test_metadata_roundtrips_through_save_and_read(tmp_path: Path) -> None:
@@ -867,9 +871,12 @@ def test_metadata_roundtrips_through_save_and_read(tmp_path: Path) -> None:
     p = tmp_path / "data.bdf.csv"
     io.save(df, p, metadata=original)
     _, restored = io.read(p)
-    # bdf.source is the plugin id this read resolved, assigned unconditionally,
-    # so it cannot round-trip against an instance that never set it.
-    assert restored.bdf.source is not None
+    import bdf
+
+    # the origin passes through the sidecar read: nothing read this metadata from a source
+    assert restored.bdf.source is None
+    assert restored.bdf.created_with == bdf.__version__
+    # the writer stamps describe the file, so they cannot round-trip against an instance that never set them
     restored_without_bdf = restored.model_copy(update={"bdf": original.bdf})
     assert restored_without_bdf == original
 
@@ -1434,6 +1441,32 @@ def test_empty_metadata_is_not_stamped_into_existence(tmp_path: Path) -> None:
     assert not p.with_suffix(".metadata.json").exists()
 
 
+def test_the_origin_passes_through_a_sidecar_read_and_save(tmp_path: Path) -> None:
+    """The origin a sidecar states survives a read of it and a save, while the
+    writer stamps are replaced: a vendor file read, saved and read back as BDF
+    still names the vendor plugin and the bdf that read it."""
+    df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
+    old = tmp_path / "old.bdf.csv"
+    df.write_csv(old)
+    origin = {"source": "neware_nda", "created_with": "0.1.0", "time_reconciliation": [{"column": "Test Time / s"}]}
+    old.with_suffix(".metadata.json").write_text(
+        json.dumps({"extras": {"rig_bay": "B3"}, "bdf": {**origin, "bdf_version": "0.1.0"}}), encoding="utf-8"
+    )
+
+    _, meta = io.read(old)
+    new = tmp_path / "new.bdf.csv"
+    io.save(df, new, metadata=meta)
+    _, restored = io.read(new)
+
+    import bdf
+
+    doc = json.loads(new.with_suffix(".metadata.json").read_text(encoding="utf-8"))
+    assert {key: doc["bdf"][key] for key in origin} == origin
+    assert doc["bdf"]["bdf_version"] == bdf.__version__
+    assert restored.bdf.source == "neware_nda"
+    assert restored.bdf.created_with == "0.1.0"
+
+
 def test_a_stale_writer_stamp_is_dropped_where_the_writer_states_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1463,9 +1496,9 @@ _SIDECARS = Path(__file__).parent.parent / "data" / "sidecars"
 
 
 def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again(tmp_path: Path) -> None:
-    """A sidecar bdf 0.2.0rc3 wrote reads with no warning, keeps its records
-    and extras through a save, and loses only its writer stamps, the
-    deprecated ``battinfo_ref`` among them."""
+    """A sidecar bdf 0.2.0rc3 wrote reads with no warning, keeps its records,
+    extras and origin through a save, and loses only its writer stamps,
+    the deprecated ``battinfo_ref`` among them."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         df, meta = io.read(_SIDECARS / "0.2.0rc3" / "data.bdf.csv")
@@ -1487,6 +1520,8 @@ def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again(tmp_path: Path) -> None:
     assert doc["bdf"]["source"] == "bdf_csv"
     assert doc["bdf"]["bdf_version"] == bdf.__version__
     assert doc["bdf"]["battinfo_version"] == BATTINFO_SCHEMA.version
+    # 0.2.0rc3 stated no creator, so the first save under this release states its own
+    assert doc["bdf"]["created_with"] == bdf.__version__
     assert restored.battinfo_test == meta.battinfo_test
     assert restored.extras == meta.extras
 
