@@ -7,6 +7,7 @@ import pytest
 
 from bdf import Metadata
 from bdf.battinfo import BATTINFO_SCHEMA, SchemaError
+from bdf.metadata import BATTINFO_REFUSALS_CONTEXT
 
 _TABLE = {"type": "Table", "url": "a.csv", "table_schema": {"columns": [{"name": "t"}]}}
 
@@ -83,6 +84,16 @@ def test_set_refuses_a_path_that_names_no_entity() -> None:
     """The first segment must be an entity field."""
     with pytest.raises(AttributeError, match="battinfo_nope"):
         Metadata().set("battinfo_nope.x", 1)
+
+
+def test_a_kept_refusal_elsewhere_does_not_block_a_write() -> None:
+    """A lenient read keeps a refused value; a write to another field still succeeds, and check() reports it."""
+    kept: list[str] = []
+    meta = Metadata.model_validate({"battinfo_test": {"test": {"name": 3}}}, context={BATTINFO_REFUSALS_CONTEXT: kept})
+    assert kept
+    meta.set("battinfo_test.test.instrument_name", "BaSyTec CTS")
+    assert meta.get("battinfo_test.test.instrument_name") == "BaSyTec CTS"
+    assert any("battinfo_test.test.name" in line for line in meta.check())
 
 
 def test_assigning_a_whole_entity_is_checked() -> None:

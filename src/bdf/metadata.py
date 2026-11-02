@@ -12,14 +12,16 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from bdf.battinfo import document
-from bdf.battinfo.schema import BATTINFO_SCHEMA, SchemaError
+from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, SchemaError
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -41,6 +43,36 @@ _ENTITY_DOCS: dict[str, str] = {
     "battinfo_test_protocol": "test-protocol.schema.json",
     "battinfo_dataset": "dataset.schema.json",
 }
+
+
+BATTINFO_SCHEMA_CONTEXT = "battinfo_schema"
+"""Validation context key naming the `BattinfoSchema` the entity records are
+checked against and bounded by. Without it, `BATTINFO_SCHEMA` serves."""
+
+BATTINFO_REFUSALS_CONTEXT = "battinfo_refusals"
+"""Validation context key holding a list. Where it is given, a value the
+schema refuses is appended to it, one message per refusal, and the record is
+kept as it is, rather than failing validation."""
+
+
+def _context(info: ValidationInfo) -> tuple[BattinfoSchema, list[str] | None]:
+    """Read the schema set, and the refusal list, a validation context gives.
+
+    Args:
+        info: The validation info pydantic passes a field validator.
+
+    Returns:
+        The set under `BATTINFO_SCHEMA_CONTEXT` (`BATTINFO_SCHEMA` where the
+        context names none), and the list under `BATTINFO_REFUSALS_CONTEXT`
+        (``None`` where a refusal fails validation).
+    """
+    context = info.context if isinstance(info.context, dict) else {}
+    schema = context.get(BATTINFO_SCHEMA_CONTEXT)
+    refusals = context.get(BATTINFO_REFUSALS_CONTEXT)
+    return (
+        schema if isinstance(schema, BattinfoSchema) else BATTINFO_SCHEMA,
+        refusals if isinstance(refusals, list) else None,
+    )
 
 
 def _absolute_refs(node: Any, base_id: str) -> Any:
@@ -106,9 +138,10 @@ class _RecordModel(BaseModel):
 class BdfReadInfo(_RecordModel):
     """BDF-owned read audit facts, kept out of the BattINFO records.
 
-    The writer stamps (``bdf_version``, ``ontology_version``,
-    ``battinfo_version``) describe the sidecar file itself, so ``save()``
-    overwrites them on every sidecar it writes.
+    The writer stamps (``bdf_version``, ``ontology_version``) describe the
+    sidecar file itself, so ``save()`` overwrites them on every sidecar it
+    writes. ``battinfo_version`` names the release the records follow, so it
+    travels with the records.
 
     A field an earlier release wrote stays declared, deprecated, so a sidecar
     that release wrote still reads.
@@ -193,6 +226,41 @@ class Metadata(_RecordModel):
     value, because such a value raises. ``None`` when a read staged nothing
     here. Written by `save()` and restored on a later read."""
 
+    _battinfo_schema: BattinfoSchema | None = PrivateAttr(default=None)
+    # The set the entities were checked against, where a validation context
+    # named one other than `BATTINFO_SCHEMA` (a sidecar read of another
+    # release); `None` means `BATTINFO_SCHEMA`, so metadata checked by the
+    # loaded set compares equal however it was built. `set()` checks a write
+    # against the same set.
+
+    _battinfo_unchecked: bool = PrivateAttr(default=False)
+    # Set where validation kept records the BattINFO set they are bounded by
+    # refused (`BATTINFO_REFUSALS_CONTEXT` collected one): the records then
+    # follow `bdf.battinfo_version`, the release the data stated, rather than
+    # the set that refused them.
+
+    @model_validator(mode="after")
+    def _note_kept_refusals(self, info: ValidationInfo) -> "Metadata":
+        """Mark the records unchecked where validation kept a refused value.
+
+        Only ever set, never cleared: an assignment validates with no context,
+        and records kept once stay unchecked.
+
+        Args:
+            info: The validation info, whose context may hold the refusals
+                collected.
+
+        Returns:
+            This instance.
+        """
+        context = info.context if isinstance(info.context, dict) else {}
+        stated = context.get(BATTINFO_SCHEMA_CONTEXT)
+        if isinstance(stated, BattinfoSchema) and stated is not BATTINFO_SCHEMA:
+            self._battinfo_schema = stated
+        if _context(info)[1]:
+            self._battinfo_unchecked = True
+        return self
+
     @field_validator(*_ENTITY_DOCS, mode="after")
     @classmethod
     def _check_entity(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
@@ -200,21 +268,25 @@ class Metadata(_RecordModel):
 
         Args:
             value: The entity's data.
-            info: The validation info, naming the field.
+            info: The validation info, whose context may name the schema set
+                and collect refusals.
 
         Returns:
             The pruned, coerced copy.
 
         Raises:
-            ValidationError: The loaded set refuses a value, located at it
-                (``battinfo_test.test.started_at``).
+            ValidationError: The set refuses a value, located at it
+                (``battinfo_test.test.started_at``), unless the context
+                collects refusals.
         """
         entity = info.field_name or ""
-        schema = BATTINFO_SCHEMA
+        schema, collected = _context(info)
         doc_name = _ENTITY_DOCS[entity]
         data = document.coerce(schema, doc_name, document.prune(value))
         errors = document.refusals(schema, doc_name, data)
-        if errors:
+        if collected is not None:
+            collected.extend(document.message(schema, entity, error) for error in errors)
+        elif errors:
             raise ValidationError.from_exception_data(
                 entity,
                 [
@@ -232,12 +304,17 @@ class Metadata(_RecordModel):
             )
         return data
 
+    @property
+    def battinfo_schema(self) -> BattinfoSchema:
+        """The schema set the entities are checked against."""
+        return self._battinfo_schema or BATTINFO_SCHEMA
+
     def set(self, path: str | Sequence[str | int], value: Any) -> None:
         """Coerce, check, and store one value, creating the mappings above it.
 
         The whole entity is checked, so jsonschema decides every choice the
-        value sits inside. A refusal elsewhere in the entity does not block
-        the write.
+        value sits inside. A refusal elsewhere in the entity, one a lenient
+        read kept, does not block the write.
 
         Args:
             path: The entity field, then the keys below it:
@@ -265,7 +342,7 @@ class Metadata(_RecordModel):
                 where = ".".join(str(part) for part in (entity, *keys[: depth + 1]))
                 raise SchemaError(f"{where} holds no mapping, so nothing can be set below it")
         parent[keys[-1]] = value
-        schema = BATTINFO_SCHEMA
+        schema = self.battinfo_schema
         data = document.coerce(schema, doc_name, document.prune(data))
         errors = [error for error in document.refusals(schema, doc_name, data) if document.concerns(error, keys)]
         if errors:
@@ -298,12 +375,29 @@ class Metadata(_RecordModel):
             One line per refused value, naming its path and the reason. An
             empty list means every entity follows the schema set.
         """
-        schema = BATTINFO_SCHEMA
+        schema = self.battinfo_schema
         return [
             document.message(schema, entity, error)
             for entity, doc_name in _ENTITY_DOCS.items()
             for error in document.refusals(schema, doc_name, getattr(self, entity))
         ]
+
+    def _battinfo_stamp(self) -> str | None:
+        """Return the BattINFO release a sidecar written from this metadata states.
+
+        A record follows the release of the set it is bounded by, so the
+        stamp is that release. A sidecar read whose records the set refused
+        keeps the release the sidecar stated instead, because those records
+        were never shown to follow the set they are bounded by.
+
+        Returns:
+            The release the records follow. ``None`` where records bounded by
+            different releases hold values, where the set holding them names
+            no release, or where a refused read stated none.
+        """
+        if self._battinfo_unchecked:
+            return self.bdf.battinfo_version
+        return self.battinfo_schema.version
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

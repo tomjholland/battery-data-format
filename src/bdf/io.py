@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 import polars as pl
 
 from bdf._time_scale import detect_scale_mismatch
-from bdf.battinfo.schema import BATTINFO_SCHEMA, SchemaError
+from bdf.battinfo.schema import SchemaError
 from bdf.file_utils import open_compressed, strip_compression_suffix
 from bdf.metadata import Metadata
 from bdf.metadata_parsers import BdfSidecarParser
@@ -21,7 +21,12 @@ from bdf.spec import COLUMN_ONTOLOGY
 
 
 def _assemble_metadata(
-    path: str | Path, resolved_plugin: Plugin, *, tz: str, day_month_order: DayMonthOrder | None = None
+    path: str | Path,
+    resolved_plugin: Plugin,
+    *,
+    tz: str,
+    day_month_order: DayMonthOrder | None = None,
+    battinfo: Literal["strict", "lenient"] = "strict",
 ) -> Metadata:
     """Take this read's metadata from exactly one source, never combined.
 
@@ -31,6 +36,8 @@ def _assemble_metadata(
             reserved sidecar sits beside ``path``.
         tz: IANA timezone forwarded to the plugin's metadata parser.
         day_month_order: Field order forwarded to the plugin's metadata parser.
+        battinfo: How the reserved sidecar treats a BattINFO value the
+            release it states refuses (see ``BdfSidecarParser.battinfo``).
 
     Returns:
         The reserved sidecar's ``Metadata`` where ``<stem>.metadata.json``
@@ -45,7 +52,7 @@ def _assemble_metadata(
             metadata would otherwise write over the file the read could not
             read.
     """
-    reserved = BdfSidecarParser()
+    reserved = BdfSidecarParser(battinfo=battinfo)
     if reserved.matches(path):
         return reserved.parse(path)
 
@@ -69,6 +76,7 @@ def _read(
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
+    battinfo: Literal["strict", "lenient"] = "strict",
 ) -> tuple[pl.DataFrame | pl.LazyFrame, Metadata]:
     """Read ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata)``.
 
@@ -99,7 +107,13 @@ def _read(
         day_month_order=day_month_order,
     )
 
-    metadata = _assemble_metadata(path, resolved_plugin, tz=tz, day_month_order=day_month_order)
+    metadata = _assemble_metadata(
+        path,
+        resolved_plugin,
+        tz=tz,
+        day_month_order=day_month_order,
+        battinfo=battinfo,
+    )
 
     if normalize:
         bdf_df, repairs = _reconcile_time_scale(bdf_df, reconcile_time=reconcile_time, strict=validate)
@@ -230,6 +244,7 @@ def read(
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
+    battinfo: Literal["strict", "lenient"] = "strict",
 ) -> tuple[pl.DataFrame, Metadata]:
     """Read ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata)``.
 
@@ -255,6 +270,14 @@ def read(
             default (warns when ``validate=False``); pass ``reconcile_time=True`` to
             explicitly rescale known unit factors, recorded under
             ``metadata.bdf.time_reconciliation``. Only active when ``normalize=True``.
+        battinfo: How a ``.metadata.json`` sidecar's BattINFO records are checked.
+            They are checked against the BattINFO release the sidecar states
+            (``bdf.battinfo_version``), fetched where it is neither bundled nor
+            cached (set ``BDF_BATTINFO_FETCH=0`` to never fetch). ``"strict"``
+            (default) raises ``BDFMetadataError`` on a value that release refuses;
+            ``"lenient"`` keeps it as it is and warns ``BDFMetadataWarning``. A
+            sidecar stating no release, or one that cannot be loaded, is checked
+            against the loaded set and only warns, whichever is passed.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a DataFrame, and a ``Metadata``
@@ -275,6 +298,7 @@ def read(
         tz=tz,
         day_month_order=day_month_order,
         reconcile_time=reconcile_time,
+        battinfo=battinfo,
     )
     return cast(pl.DataFrame, bdf_df), metadata
 
@@ -289,6 +313,7 @@ def scan(
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
+    battinfo: Literal["strict", "lenient"] = "strict",
 ) -> tuple[pl.LazyFrame, Metadata]:
     """Scan ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata)``.
 
@@ -321,6 +346,14 @@ def scan(
             default (warns when ``validate=False``); pass ``reconcile_time=True`` to
             explicitly rescale known unit factors, recorded under
             ``metadata.bdf.time_reconciliation``. Only active when ``normalize=True``.
+        battinfo: How a ``.metadata.json`` sidecar's BattINFO records are checked.
+            They are checked against the BattINFO release the sidecar states
+            (``bdf.battinfo_version``), fetched where it is neither bundled nor
+            cached (set ``BDF_BATTINFO_FETCH=0`` to never fetch). ``"strict"``
+            (default) raises ``BDFMetadataError`` on a value that release refuses;
+            ``"lenient"`` keeps it as it is and warns ``BDFMetadataWarning``. A
+            sidecar stating no release, or one that cannot be loaded, is checked
+            against the loaded set and only warns, whichever is passed.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a LazyFrame, and a ``Metadata``
@@ -341,6 +374,7 @@ def scan(
         tz=tz,
         day_month_order=day_month_order,
         reconcile_time=reconcile_time,
+        battinfo=battinfo,
     )
     return cast(pl.LazyFrame, bdf_df), metadata
 
@@ -418,21 +452,24 @@ def _as_polars(df: pl.DataFrame | pl.LazyFrame | pd.DataFrame) -> pl.DataFrame |
 _WRITER_STAMPS = ("bdf_version", "ontology_version", "battinfo_version", "battinfo_ref")
 
 
-def _version_stamps() -> dict[str, str | None]:
+def _version_stamps(metadata: Metadata) -> dict[str, str | None]:
     """Return the writer-identity stamps a written sidecar carries (GH #106).
+
+    Args:
+        metadata: The metadata being written, whose records name the BattINFO
+            release they follow.
 
     Returns:
         ``bdf_version`` (the installed package version), ``ontology_version``
         (the pinned BDF ontology release), and ``battinfo_version`` (the
-        BattINFO release of the loaded schema set the records were checked
-        against).
+        BattINFO release the records follow, see ``Metadata._battinfo_stamp``).
     """
     import bdf
 
     return {
         "bdf_version": bdf.__version__,
         "ontology_version": COLUMN_ONTOLOGY.ontology_version or None,
-        "battinfo_version": BATTINFO_SCHEMA.version,
+        "battinfo_version": metadata._battinfo_stamp(),
     }
 
 
@@ -443,12 +480,15 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
     ``bdf.bdf_version``, ``bdf.ontology_version``, and ``bdf.battinfo_version``.
     The stamps identify the file's writer, so they overwrite any stamps the
     caller's object carries, and a read-then-save records the version that
-    performed the save. A stale writer stamp the caller's object carries,
-    ``battinfo_ref`` included, is dropped even where this writer states no
-    value for it. The entities are checked first, so a value written into an
-    entity's dict directly never reaches the file unchecked. The caller's
-    object is not modified. A ``Metadata`` that carries nothing still writes
-    no sidecar: the stamps describe a sidecar, so they never create one.
+    performed the save. ``battinfo_version`` names the release the records
+    follow rather than the writer's loaded set, and a sidecar whose records
+    follow no one release states none. A stale writer stamp the caller's
+    object carries, ``battinfo_ref`` included, is dropped even where this
+    writer states no value for it. The entities are checked first, unless a lenient read kept refused values
+    in them, so a value written into an entity's dict directly never reaches
+    the file unchecked. The caller's object is not modified. A ``Metadata`` that carries nothing
+    still writes no sidecar: the stamps describe a sidecar, so they never
+    create one.
 
     Args:
         sidecar: Path of the ``.metadata.json`` file beside the artifact.
@@ -456,7 +496,7 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
             defaults reach the file, so a ``Metadata`` that carries nothing
             writes no sidecar at all, and deletes one the target already had.
     """
-    refused = metadata.check()
+    refused = [] if metadata._battinfo_unchecked else metadata.check()
     if refused:
         raise SchemaError(f"{sidecar} not written: " + "; ".join(refused))
     payload = metadata.model_dump(mode="json", exclude_defaults=True)
@@ -464,7 +504,7 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
         info = payload.setdefault("bdf", {})
         for stale in _WRITER_STAMPS:
             info.pop(stale, None)
-        info.update({k: v for k, v in _version_stamps().items() if v})
+        info.update({k: v for k, v in _version_stamps(metadata).items() if v})
         sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         sidecar.unlink(missing_ok=True)
