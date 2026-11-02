@@ -243,6 +243,18 @@ class Record:
             raise SchemaError(refusals[0])
         self._data[name] = value
 
+    def __dir__(self) -> list[str]:
+        """List the fields the loaded schema declares here, so tab completion offers them.
+
+        Returns:
+            The record's own attributes, every field the node declares, and
+            every set entry under a key pattern whose name is an identifier.
+        """
+        names = set(self._node.get("properties", {}))
+        if self._node.get("patternProperties"):
+            names.update(key for key in self._data if isinstance(key, str) and key.isidentifier())
+        return sorted(names.union(super().__dir__()))
+
     def __getitem__(self, name: str) -> Any:
         """Read a field or a keyed entry by subscript, as :meth:`__getattr__` reads it.
 

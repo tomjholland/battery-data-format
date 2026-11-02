@@ -55,6 +55,21 @@ def _conditions_record() -> Record:
     return Record(schema, resolved, resolved_id, data={}, path="conditions")
 
 
+class TestDir:
+    def test_dir_lists_the_declared_fields(self) -> None:
+        """battinfo-records: dir() offers each field the loaded schema declares."""
+        _, record = _cell_instance_record()
+        assert "cell_instance" in dir(record)
+        assert "name" in dir(record.cell_instance)
+        assert "to_dict" in dir(record)
+
+    def test_dir_lists_a_set_entry_under_a_key_pattern(self) -> None:
+        """battinfo-records: dir() offers a set entry under a key pattern."""
+        conditions = _conditions_record()
+        conditions["temperature_c"] = {"typical_value": 25}
+        assert "temperature_c" in dir(conditions)
+
+
 class TestAssignmentAndRead:
     def test_a_nested_assignment_needs_no_guard(self) -> None:
         """battinfo-records: A nested assignment needs no guard."""
