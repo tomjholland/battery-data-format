@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 # Fail the warm if the primed cache grows beyond this, to stay clear of
@@ -31,8 +32,13 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from bdf import fetch  # noqa: E402
+from bdf.battinfo.schema import BattinfoSchema, _release_cache_dir  # noqa: E402
 from bdf.spec import ColumnOntology, _ontology_cache_dir  # noqa: E402
-from docs.examples.remote_sources import PINNED_ONTOLOGY_VERSIONS, REMOTE_DATA_SOURCES  # noqa: E402
+from docs.examples.remote_sources import (  # noqa: E402
+    PINNED_BATTINFO_VERSIONS,
+    PINNED_ONTOLOGY_VERSIONS,
+    REMOTE_DATA_SOURCES,
+)
 from tests.integration.test_cases import ALL_CASES  # noqa: E402
 
 
@@ -53,19 +59,23 @@ def url_sources() -> list[str]:
 
 
 def emit_key(urls: list[str]) -> str:
-    """Compute the content-addressed cache key for the URL set and pinned ontology versions.
+    """Compute the content-addressed cache key for the URL set and pinned releases.
 
-    Hashes the sorted, newline-joined URL list plus the pinned ontology version
-    tags with SHA-256 — the same algorithm ``fetch._safe_cache_name`` uses on
+    Hashes the sorted, newline-joined URL list plus the pinned ontology and
+    BattINFO release tags with SHA-256 — the same algorithm ``fetch._safe_cache_name`` uses on
     individual URLs. Performs no network.
 
     Args:
         urls: Sorted list of URL strings.
 
     Returns:
-        The hex SHA-256 digest of the joined URL list and ontology versions.
+        The hex SHA-256 digest of the joined URL list and pinned releases.
     """
-    joined = "\n".join(urls + [f"ontology-version:{v}" for v in PINNED_ONTOLOGY_VERSIONS])
+    joined = "\n".join(
+        urls
+        + [f"ontology-version:{v}" for v in PINNED_ONTOLOGY_VERSIONS]
+        + [f"battinfo-version:{v}" for v in PINNED_BATTINFO_VERSIONS]
+    )
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
@@ -96,6 +106,37 @@ def warm(urls: list[str], max_bytes: int = _MAX_CACHE_BYTES) -> None:
             )
 
 
+def _warm_releases(label: str, versions: tuple[str, ...], fetch_one: Callable[[str], Path], max_bytes: int) -> int:
+    """Fetch each pinned release with ``fetch_one``, keeping the running total under ``max_bytes``.
+
+    Args:
+        label: The release kind, for the messages (e.g. ``"ontology"``).
+        versions: The releases to fetch.
+        fetch_one: Fetches one release into the cache and returns the file or
+            directory it wrote.
+        max_bytes: Cumulative byte ceiling, shared with ``warm``'s URL total.
+
+    Returns:
+        Total bytes written across all fetched releases.
+    """
+    total = 0
+    for version in versions:
+        try:
+            dest = fetch_one(version)
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"ERROR: {label} fetch failed for release {version!r}: {e}")
+        files = [p for p in dest.rglob("*") if p.is_file()] if dest.is_dir() else [dest]
+        total += sum(p.stat().st_size for p in files)
+        print(f"  cached: {label} release {version} -> {dest}")
+        if total > max_bytes:
+            sys.exit(
+                f"ERROR: warmed {label} cache reached {total / 1024**3:.2f} GiB, "
+                f"exceeding the {max_bytes / 1024**3:.2f} GiB limit "
+                f"(after fetching release {version})."
+            )
+    return total
+
+
 def warm_ontology_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACHE_BYTES) -> int:
     """Fetch each pinned ontology release into the versioned ontology cache.
 
@@ -110,23 +151,34 @@ def warm_ontology_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACH
     Returns:
         Total bytes written across all fetched versions.
     """
-    cache_dir = _ontology_cache_dir()
-    total = 0
-    for version in versions:
-        dest = cache_dir / f"bdf-ontology-v{version}.ttl"
-        try:
-            ColumnOntology.get_snapshot(dest=dest, version=version)
-        except Exception as e:  # noqa: BLE001
-            sys.exit(f"ERROR: ontology fetch failed for version {version!r}: {e}")
-        total += dest.stat().st_size
-        print(f"  cached: ontology release {version} -> {dest}")
-        if total > max_bytes:
-            sys.exit(
-                f"ERROR: warmed ontology cache reached {total / 1024**3:.2f} GiB, "
-                f"exceeding the {max_bytes / 1024**3:.2f} GiB limit "
-                f"(after fetching version {version})."
-            )
-    return total
+    return _warm_releases(
+        "ontology",
+        versions,
+        lambda v: ColumnOntology.get_snapshot(dest=_ontology_cache_dir() / f"bdf-ontology-v{v}.ttl", version=v),
+        max_bytes,
+    )
+
+
+def warm_battinfo_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACHE_BYTES) -> int:
+    """Fetch each pinned BattINFO release into the release cache.
+
+    Writes each release where ``BattinfoSchema.load_version`` reads it
+    (``battinfo-v{version}`` under ``BDF_CACHE_DIR``), so the notebook's
+    ``load_version`` call finds it cached and makes no network request.
+
+    Args:
+        versions: BattINFO releases to fetch (e.g. ``("0.8.0rc2",)``).
+        max_bytes: Cumulative byte ceiling, shared with ``warm``'s URL total.
+
+    Returns:
+        Total bytes written across all fetched releases.
+    """
+    return _warm_releases(
+        "BattINFO",
+        versions,
+        lambda v: BattinfoSchema.get_snapshot(dest=_release_cache_dir(v), version=v),
+        max_bytes,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -146,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     warmed_bytes = 0
     warm(urls, max_bytes=_MAX_CACHE_BYTES)
     warmed_bytes += warm_ontology_versions(PINNED_ONTOLOGY_VERSIONS, max_bytes=_MAX_CACHE_BYTES - warmed_bytes)
+    warmed_bytes += warm_battinfo_versions(PINNED_BATTINFO_VERSIONS, max_bytes=_MAX_CACHE_BYTES - warmed_bytes)
     print("Cache warm complete.")
 
 
