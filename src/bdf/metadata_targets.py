@@ -22,7 +22,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from bdf.battinfo.schema import BATTINFO_SCHEMA
-from bdf.metadata import _ENTITY_DOCS, _resolve_root
+from bdf.metadata import _ENTITY_DOCS
 
 
 class MetadataTarget(BaseModel):
@@ -145,7 +145,7 @@ class _MetadataNode:
 
         # One segment per access, so a self-referencing schema costs nothing
         # until a caller walks into it.
-        resolved, base_id = BATTINFO_SCHEMA.resolve(declared[name], self._base_id)
+        resolved, base_id = BATTINFO_SCHEMA.field(self._node, self._base_id, name, ".".join(path))
         if resolved.get("type") == "array":
             raise AttributeError(f"{'.'.join(path)!r} is an array field, which states no metadata target")
         if "properties" in resolved:
@@ -178,7 +178,7 @@ class _MetadataRoot:
         doc_name = _ENTITY_DOCS.get(name)
         if doc_name is None:
             raise AttributeError(f"{name!r} is not a declared BattINFO metadata record")
-        node, base_id = _resolve_root(doc_name)
+        node, base_id = BATTINFO_SCHEMA.root(doc_name)
         return _MetadataNode((name,), node, base_id)
 
 

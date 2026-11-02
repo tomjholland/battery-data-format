@@ -17,11 +17,8 @@ is.
 from __future__ import annotations
 
 import copy
-import re
 from typing import Any
-from urllib.parse import urljoin
 
-import jsonschema
 from pydantic import GetCoreSchemaHandler, TypeAdapter, ValidationError
 from pydantic_core import CoreSchema, core_schema
 
@@ -36,30 +33,6 @@ _LAX_TYPES: dict[str, TypeAdapter[Any]] = {
     "boolean": TypeAdapter(bool),
 }
 """JSON Schema's scalar types a leaf is coerced to, each through pydantic's lax mode."""
-
-
-def _absolute_refs(node: Any, base_id: str) -> Any:
-    """Copy a schema node, with every reference resolved against one document.
-
-    A reference reads against the document that declares it. A node validated
-    on its own sits outside that document, so a document-relative reference is
-    written out in full first.
-
-    Args:
-        node: The schema node, list, or leaf value to copy.
-        base_id: The ``$id`` the node's references resolve against.
-
-    Returns:
-        The copy, carrying absolute references alone.
-    """
-    if isinstance(node, dict):
-        return {
-            key: urljoin(base_id, value) if key == "$ref" and isinstance(value, str) else _absolute_refs(value, base_id)
-            for key, value in node.items()
-        }
-    if isinstance(node, list):
-        return [_absolute_refs(item, base_id) for item in node]
-    return node
 
 
 def _is_object(node: dict[str, Any]) -> bool:
@@ -88,6 +61,22 @@ def _is_empty(value: Any) -> bool:
         string.
     """
     return value is None or (isinstance(value, (dict, list, str)) and len(value) == 0)
+
+
+def _has_value(value: Any) -> bool:
+    """Report whether a value holds anything serialisation keeps, without copying it.
+
+    Args:
+        value: The stored value to test.
+
+    Returns:
+        ``True`` where :func:`_prune` leaves the value not empty.
+    """
+    if isinstance(value, dict):
+        return any(_has_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_value(item) for item in value)
+    return not _is_empty(value)
 
 
 def _prune(value: Any) -> Any:
@@ -152,11 +141,10 @@ def _coerce(schema: BattinfoSchema, node: dict[str, Any], base_id: str, value: A
         A copy of the value, every coercible leaf converted.
     """
     if isinstance(value, dict) and _is_object(node):
-        walker = Record(schema, node, base_id, {}, "")
         coerced: dict[str, Any] = {}
         for key, item in value.items():
             try:
-                child, child_id = walker._field(key)
+                child, child_id = schema.field(node, base_id, key, key)
             except (AttributeError, SchemaError):
                 coerced[key] = item
                 continue
@@ -294,10 +282,9 @@ class Record:
         if name.startswith("_"):
             raise KeyError(name)
         try:
-            self._field(name)
+            self.__setattr__(name, value)
         except AttributeError as exc:
             raise KeyError(name) from exc
-        self.__setattr__(name, value)
 
     def __contains__(self, name: object) -> bool:
         """Report whether a field or a keyed entry holds a value.
@@ -308,7 +295,7 @@ class Record:
         Returns:
             ``True`` where the entry is set to a value that is not empty.
         """
-        return isinstance(name, str) and name in self._data and not _is_empty(_prune(self._data[name]))
+        return isinstance(name, str) and name in self._data and _has_value(self._data[name])
 
     def __eq__(self, other: object) -> bool:
         """Report whether ``other`` is a record over equal data.
@@ -371,20 +358,7 @@ class Record:
             SchemaError: The node declares a key pattern, and the name matches
                 none of them.
         """
-        declared = self._node.get("properties", {})
-        if name in declared:
-            return self._schema.resolve(declared[name], self._base_id)
-        patterns = self._node.get("patternProperties", {})
-        for pattern, node in patterns.items():
-            if re.search(pattern, name):
-                return self._schema.resolve(node, self._base_id)
-        field_path = self._field_path(name)
-        if patterns:
-            raise SchemaError(
-                f"BattINFO schema {self._version()} declares no key pattern matching {field_path}: "
-                f"the accepted patterns are {', '.join(sorted(patterns))}"
-            )
-        raise AttributeError(f"BattINFO schema {self._version()} declares no field {field_path}")
+        return self._schema.field(self._node, self._base_id, name, self._field_path(name))
 
     def _refusals(self, name: str, node: dict[str, Any], base_id: str, value: Any) -> list[str]:
         """Report what the field's node refuses about a value.
@@ -401,12 +375,11 @@ class Record:
             accepts the value.
         """
         field_path = self._field_path(name)
-        validator = jsonschema.Draft202012Validator(
-            _absolute_refs(node, base_id),
-            registry=self._schema._registry,
-        )
-        reasons = [error.message for error in validator.iter_errors(value)]
-        return [f"BattINFO schema {self._version()} refuses {field_path}: {reason}" for reason in reasons]
+        validator = self._schema.validator(node, base_id)
+        return [
+            f"BattINFO schema {self._schema.label} refuses {field_path}: {error.message}"
+            for error in validator.iter_errors(value)
+        ]
 
     def _field_path(self, name: str) -> str:
         """Return the dotted path from the record root to one field.
@@ -418,14 +391,6 @@ class Record:
             The field's path, which is its name alone at the record root.
         """
         return f"{self._path}.{name}" if self._path else name
-
-    def _version(self) -> str:
-        """Return the loaded schema version, for a message that names it.
-
-        Returns:
-            The version the loaded set reports, or ``unversioned``.
-        """
-        return self._schema.version or "unversioned"
 
     @classmethod
     def _serialise(cls, value: Any) -> Any:

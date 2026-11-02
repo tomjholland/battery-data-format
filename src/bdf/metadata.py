@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Mapping, Optional, Union
 
-import jsonschema
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -20,8 +19,8 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, InitErrorDetails, PydanticCustomError, core_schema
 
-from bdf.battinfo.record import Record, _absolute_refs, _coerce
-from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema
+from bdf.battinfo.record import Record, _coerce, _has_value
+from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, _absolute_refs
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -45,19 +44,6 @@ _ENTITY_DOCS: dict[str, str] = {
 }
 
 
-def _resolve_root(doc_name: str, schema: BattinfoSchema | None = None) -> tuple[dict[str, Any], str]:
-    """Resolve one BattINFO entity's root schema node.
-
-    Args:
-        doc_name: The bundle-relative document naming the entity's root node.
-        schema: The set to resolve it in. Defaults to `BATTINFO_SCHEMA`.
-
-    Returns:
-        The resolved root node, and the `$id` it resolved against.
-    """
-    return (schema or BATTINFO_SCHEMA).root(doc_name)
-
-
 def _root_record(doc_name: str, data: dict[str, Any] | None = None, schema: BattinfoSchema | None = None) -> Record:
     """Build a `Record` bounded by one BattINFO entity's root schema node.
 
@@ -71,7 +57,7 @@ def _root_record(doc_name: str, data: dict[str, Any] | None = None, schema: Batt
         A record bounded by the document's root node, over `data`.
     """
     schema = schema or BATTINFO_SCHEMA
-    node, base_id = _resolve_root(doc_name, schema)
+    node, base_id = schema.root(doc_name)
     return Record(schema, node, base_id, data if data is not None else {}, path="")
 
 
@@ -85,33 +71,24 @@ schema refuses is appended to it, one message per refusal, and the record is
 kept as it is, rather than failing validation."""
 
 
-def _context_schema(info: ValidationInfo) -> BattinfoSchema:
-    """Return the schema set a validation context names, or `BATTINFO_SCHEMA`.
+def _context(info: ValidationInfo) -> tuple[BattinfoSchema, list[str] | None]:
+    """Read the schema set, and the refusal list, a validation context gives.
 
     Args:
         info: The validation info pydantic passes a field validator.
 
     Returns:
-        The set under `BATTINFO_SCHEMA_CONTEXT`, where the context names one.
+        The set under `BATTINFO_SCHEMA_CONTEXT` (`BATTINFO_SCHEMA` where the
+        context names none), and the list under `BATTINFO_REFUSALS_CONTEXT`
+        (``None`` where a refusal fails validation).
     """
     context = info.context if isinstance(info.context, dict) else {}
     schema = context.get(BATTINFO_SCHEMA_CONTEXT)
-    return schema if isinstance(schema, BattinfoSchema) else BATTINFO_SCHEMA
-
-
-def _context_refusals(info: ValidationInfo) -> list[str] | None:
-    """Return the list a validation context collects refusals in, if it gives one.
-
-    Args:
-        info: The validation info pydantic passes a field validator.
-
-    Returns:
-        The list under `BATTINFO_REFUSALS_CONTEXT`, or ``None`` where a
-        refusal fails validation.
-    """
-    context = info.context if isinstance(info.context, dict) else {}
     refusals = context.get(BATTINFO_REFUSALS_CONTEXT)
-    return refusals if isinstance(refusals, list) else None
+    return (
+        schema if isinstance(schema, BattinfoSchema) else BATTINFO_SCHEMA,
+        refusals if isinstance(refusals, list) else None,
+    )
 
 
 def _entity_field(name: str) -> Any:
@@ -152,6 +129,11 @@ class EntityRecord:
 
     name: str
 
+    @property
+    def doc_name(self) -> str:
+        """The bundle-relative document the field's root record is bounded by."""
+        return _ENTITY_DOCS[self.name]
+
     def _refuse(self, data: dict[str, Any], schema: BattinfoSchema, collected: list[str] | None = None) -> None:
         """Report every value a schema set refuses: raise, or collect them.
 
@@ -167,9 +149,8 @@ class EntityRecord:
             ValidationError: The set refuses a value, and ``collected`` is
                 ``None``.
         """
-        node, base_id = _resolve_root(_ENTITY_DOCS[self.name], schema)
-        validator = jsonschema.Draft202012Validator(_absolute_refs(node, base_id), registry=schema._registry)
-        version = schema.version or "unversioned"
+        validator = schema.root_validator(self.doc_name)
+        version = schema.label
         if collected is not None:
             for error in validator.iter_errors(data):
                 where = ".".join(str(part) for part in (self.name, *error.absolute_path))
@@ -202,11 +183,10 @@ class EntityRecord:
             A record bounded by the field's entity in the context's set, over
             the coerced copy.
         """
-        schema = _context_schema(info)
-        node, base_id = _resolve_root(_ENTITY_DOCS[self.name], schema)
-        data = _coerce(schema, node, base_id, dict(value))
-        record = _root_record(_ENTITY_DOCS[self.name], data, schema)
-        self._refuse(record.to_dict(), schema, _context_refusals(info))
+        schema, refusals = _context(info)
+        node, base_id = schema.root(self.doc_name)
+        record = Record(schema, node, base_id, _coerce(schema, node, base_id, dict(value)), path="")
+        self._refuse(record.to_dict(), schema, refusals)
         return record
 
     def _accept(self, value: Any, info: ValidationInfo) -> Record:
@@ -222,7 +202,7 @@ class EntityRecord:
             and is checked against that set.
         """
         if isinstance(value, Record):
-            self._refuse(value.to_dict(), value._schema, _context_refusals(info))
+            self._refuse(value.to_dict(), value._schema, _context(info)[1])
             return value
         return self._build(_MAPPING.validate_python(value), info)
 
@@ -259,13 +239,13 @@ class EntityRecord:
         Returns:
             The entity's resolved root node, with every reference absolute.
         """
-        node, base_id = _resolve_root(_ENTITY_DOCS[self.name])
+        node, base_id = BATTINFO_SCHEMA.root(self.doc_name)
         described: dict[str, Any] = _absolute_refs(node, base_id)
         return described
 
 
 class _RecordModel(BaseModel):
-    """Shared configuration and serialisation for every BattINFO record model."""
+    """Shared configuration and serialisation for the metadata document models."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -275,8 +255,8 @@ class _RecordModel(BaseModel):
         Returns:
             The model dumped in JSON mode with ``exclude_defaults=True``.
             Every declared field's default is ``None`` or a factory that
-            builds an empty model, and each compares equal to its own
-            default by value, so a field left untouched, and a section
+            builds an empty model or record, and each compares equal to its
+            own default by value, so a field left untouched, and a section
             nothing filled, are both absent from the result.
         """
         return self.model_dump(mode="json", exclude_defaults=True)
@@ -381,7 +361,7 @@ class Metadata(_RecordModel):
         if self._battinfo_unchecked:
             return self.bdf.battinfo_version
         records = [getattr(self, name) for name in _ENTITY_DOCS]
-        versions = {record._schema.version for record in records if record.to_dict()}
+        versions = {record._schema.version for record in records if _has_value(record._data)}
         if not versions:
             return BATTINFO_SCHEMA.version
         return versions.pop() if len(versions) == 1 else None

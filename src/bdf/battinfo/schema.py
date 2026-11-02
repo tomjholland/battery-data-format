@@ -83,6 +83,30 @@ class SchemaError(ValueError):
     """A reference, a document, or a value the loaded schema set refuses."""
 
 
+def _absolute_refs(node: Any, base_id: str) -> Any:
+    """Copy a schema node, with every reference resolved against one document.
+
+    A reference reads against the document that declares it. A node validated
+    on its own sits outside that document, so a document-relative reference is
+    written out in full first.
+
+    Args:
+        node: The schema node, list, or leaf value to copy.
+        base_id: The ``$id`` the node's references resolve against.
+
+    Returns:
+        The copy, carrying absolute references alone.
+    """
+    if isinstance(node, dict):
+        return {
+            key: urljoin(base_id, value) if key == "$ref" and isinstance(value, str) else _absolute_refs(value, base_id)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_absolute_refs(item, base_id) for item in node]
+    return node
+
+
 def _strip_required(node: Any) -> Any:
     """Copy a schema node, without a ``required`` marker at any depth.
 
@@ -178,6 +202,7 @@ class BattinfoSchema:
             self.docs[name] = _strip_required(doc)
         self._registry: Registry[Any] = _registry_for(self.docs)
         self._roots: dict[str, tuple[dict[str, Any], str]] = {}
+        self._root_validators: dict[str, Any] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Return the state to pickle: everything but the reference registry.
@@ -186,11 +211,12 @@ class BattinfoSchema:
         from the documents alone.
 
         Returns:
-            The instance's attributes, without ``_registry`` or the root cache.
+            The instance's attributes, without ``_registry`` or the root caches.
         """
         state = self.__dict__.copy()
         del state["_registry"]
         del state["_roots"]
+        del state["_root_validators"]
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -202,6 +228,12 @@ class BattinfoSchema:
         self.__dict__.update(state)
         self._registry = _registry_for(self.docs)
         self._roots = {}
+        self._root_validators = {}
+
+    @property
+    def label(self) -> str:
+        """The loaded release, for a message that names it: ``unversioned`` for a set of no release."""
+        return self.version or "unversioned"
 
     def root(self, doc_name: str) -> tuple[dict[str, Any], str]:
         """Resolve one document's root node, cached for the set.
@@ -216,12 +248,78 @@ class BattinfoSchema:
         cached = self._roots.get(doc_name)
         if cached is None:
             doc = self.docs[doc_name]
-            cached = self.resolve(doc, doc["$id"])
+            cached = self._resolve(doc, doc["$id"], [])
             self._roots[doc_name] = cached
         return cached
 
+    def root_validator(self, doc_name: str) -> Any:
+        """Return a validator for one document's root node, cached for the set.
+
+        Args:
+            doc_name: The bundle-relative document name, e.g.
+                ``"test.schema.json"``.
+
+        Returns:
+            The ``jsonschema.Draft202012Validator`` :meth:`validator` builds
+            for the document's resolved root node.
+        """
+        cached = self._root_validators.get(doc_name)
+        if cached is None:
+            cached = self.validator(*self.root(doc_name))
+            self._root_validators[doc_name] = cached
+        return cached
+
+    def validator(self, node: dict[str, Any], base_id: str) -> Any:
+        """Build a validator for one resolved node, reaching every document in the set.
+
+        Args:
+            node: The resolved schema node to validate against.
+            base_id: The ``$id`` ``node`` resolved against.
+
+        Returns:
+            A ``jsonschema.Draft202012Validator`` over ``node``.
+        """
+        import jsonschema
+
+        return jsonschema.Draft202012Validator(_absolute_refs(node, base_id), registry=self._registry)
+
+    def field(self, node: dict[str, Any], base_id: str, name: str, path: str) -> tuple[dict[str, Any], str]:
+        """Resolve one field of a loaded node, through a declared field or a key pattern.
+
+        Args:
+            node: The resolved node that holds the field.
+            base_id: The ``$id`` ``node`` resolved against.
+            name: The field, or entry name, to resolve.
+            path: The field's dotted path, for a message that names it.
+
+        Returns:
+            The resolved node, and the ``$id`` it resolved against.
+
+        Raises:
+            AttributeError: The node declares no such field, and it declares
+                no key pattern.
+            SchemaError: The node declares a key pattern, and the name matches
+                none of them.
+        """
+        declared = node.get("properties", {})
+        if name in declared:
+            return self._resolve(declared[name], base_id, [])
+        patterns = node.get("patternProperties", {})
+        for pattern, subnode in patterns.items():
+            if re.search(pattern, name):
+                return self._resolve(subnode, base_id, [])
+        if patterns:
+            raise SchemaError(
+                f"BattINFO schema {self.label} declares no key pattern matching {path}: "
+                f"the accepted patterns are {', '.join(sorted(patterns))}"
+            )
+        raise AttributeError(f"BattINFO schema {self.label} declares no field {path}")
+
     def resolve(self, node: dict[str, Any], base_id: str) -> tuple[dict[str, Any], str]:
         """Follow a ``$ref`` chain and combine the combinators into one node.
+
+        The node may come from outside the set, so its ``required`` markers
+        are stripped first, as the set's own were at load.
 
         Args:
             node: The schema node to resolve.
@@ -234,10 +332,10 @@ class BattinfoSchema:
             SchemaError: The chain runs over :data:`MAX_REFERENCE_LINKS`
                 links, or a reference names no document in the set.
         """
-        return self._resolve(node, base_id, [])
+        return self._resolve(_strip_required(node), base_id, [])
 
     def _resolve(self, node: dict[str, Any], base_id: str, chain: list[str]) -> tuple[dict[str, Any], str]:
-        """Resolve one node, carrying the chain that reached it.
+        """Resolve one node of the loaded (required-stripped) set, carrying the chain that reached it.
 
         Args:
             node: The schema node to resolve.
@@ -251,7 +349,7 @@ class BattinfoSchema:
             SchemaError: The chain runs over :data:`MAX_REFERENCE_LINKS`
                 links, or a reference names no document in the set.
         """
-        current: dict[str, Any] = _strip_required(node)
+        current: dict[str, Any] = dict(node)
         while isinstance(current.get("$ref"), str):
             reference = current["$ref"]
             target = urljoin(base_id, reference)
@@ -342,6 +440,7 @@ class BattinfoSchema:
         self.docs = other.docs
         self._registry = other._registry
         self._roots = {}
+        self._root_validators = {}
 
     @classmethod
     def build(cls) -> "BattinfoSchema":
