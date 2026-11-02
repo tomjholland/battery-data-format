@@ -39,6 +39,7 @@ from .battinfo.schema import (
     BattinfoSchema,
     SchemaError,
     fetch_enabled,
+    normalise_release,
 )
 from .file_utils import read_head, resolve_source
 from .metadata import BATTINFO_REFUSALS_CONTEXT, BATTINFO_SCHEMA_CONTEXT, Metadata
@@ -650,7 +651,7 @@ def _battinfo_schema_for(stated: Any) -> tuple[BattinfoSchema, str | None]:
     """
     if not isinstance(stated, str) or not stated.strip():
         return BATTINFO_SCHEMA, "the sidecar states no BattINFO release"
-    release = stated.strip().removeprefix("v")
+    release = normalise_release(stated)
     if BATTINFO_SCHEMA.version == release:
         return BATTINFO_SCHEMA, None
     try:

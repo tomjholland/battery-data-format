@@ -37,6 +37,7 @@ dependencies = [
   "polars>=1.41.2",
   "babel>=2.15",
   "jsonschema>=4.23",
+  "packaging>=22",
   "referencing>=0.35",
 ]
 

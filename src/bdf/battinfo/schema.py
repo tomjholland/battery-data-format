@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urljoin
 
+from packaging.version import InvalidVersion, Version
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
@@ -51,12 +52,6 @@ _RELEASE_URL_TMPL = "https://raw.githubusercontent.com/BIG-MAP/BattINFO/v{versio
 _TAGS_URL = "https://api.github.com/repos/BIG-MAP/BattINFO/tags?per_page=100"
 """The upstream API URL that lists the tags a latest release is chosen from."""
 
-_RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?")
-"""A release tag: ``v``, a three-part version, and an optional pre-release suffix."""
-
-_PRE_RELEASE_RANK = {"a": 0, "b": 1, "rc": 2, None: 3}
-"""How a pre-release suffix orders against the others and against the final release."""
-
 FETCH_ENV = "BDF_BATTINFO_FETCH"
 """Environment variable that turns off fetching a release a sidecar names, when set to ``0``, ``false``, ``no``, or ``off``."""
 
@@ -77,6 +72,19 @@ _UNIONED = ("properties", "patternProperties")
 
 _SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
 """The keywords whose values map a name to a subschema, rather than a keyword."""
+
+
+def normalise_release(version: str) -> str:
+    """Return a release as the set names it: no surrounding space, and no leading ``v``.
+
+    Args:
+        version: The release as a caller or a sidecar states it, e.g.
+            ``"v0.8.0rc2"``.
+
+    Returns:
+        The release, e.g. ``"0.8.0rc2"``.
+    """
+    return version.strip().removeprefix("v")
 
 
 class SchemaError(ValueError):
@@ -498,7 +506,7 @@ class BattinfoSchema:
         """
         import requests
 
-        version = latest_release(timeout=timeout) if version is None else version.removeprefix("v")
+        version = latest_release(timeout=timeout) if version is None else normalise_release(version)
         dest = bundled_snapshot_dir() if dest is None else Path(dest)
         documents: dict[str, bytes] = {}
         for name in MANAGED_SCHEMAS:
@@ -556,7 +564,7 @@ class BattinfoSchema:
                 upstream has not released.
             SchemaError: A document does not parse.
         """
-        version = version.removeprefix("v")
+        version = normalise_release(version)
         cached = _release_cache_dir(version)
         if refresh or not (cached / "VERSION").is_file():
             self.get_snapshot(dest=cached, version=version)
@@ -614,7 +622,7 @@ class BattinfoSchema:
                 process), or a document does not parse.
             ValueError: A document declares no ``$id``.
         """
-        version = version.removeprefix("v")
+        version = normalise_release(version)
         loaded = _RELEASES.get(version)
         if loaded is not None:
             return loaded
@@ -661,21 +669,24 @@ def _release_cache_dir(version: str) -> Path:
     return cache_dir() / f"battinfo-v{version}"
 
 
-def _release_key(version: str) -> tuple[int, int, int, int, int] | None:
-    """Return the sort key of one release, or ``None`` where it is not one.
+def _release_key(tag: str) -> Version | None:
+    """Return the version one release tag names, or ``None`` where it names no release.
 
     Args:
-        version: The release, with a leading ``v``, e.g. ``"v0.8.0rc2"``.
+        tag: The tag, with a leading ``v``, e.g. ``"v0.8.0rc2"``.
 
     Returns:
-        A key that orders a pre-release before its final release, or
-        ``None`` where ``version`` is not a release tag.
+        The version, which orders a pre-release before its final release, or
+        ``None`` where ``tag`` has no leading ``v``, is not a version, or
+        names a development or local build.
     """
-    match = _RELEASE_TAG.fullmatch(version)
-    if match is None:
+    if not tag.startswith("v"):
         return None
-    major, minor, patch, pre, pre_number = match.groups()
-    return (int(major), int(minor), int(patch), _PRE_RELEASE_RANK[pre], int(pre_number or 0))
+    try:
+        version = Version(tag[1:])
+    except InvalidVersion:
+        return None
+    return None if version.is_devrelease or version.local else version
 
 
 def latest_release(timeout: float = 30.0) -> str:
@@ -700,10 +711,10 @@ def latest_release(timeout: float = 30.0) -> str:
     response = requests.get(_TAGS_URL, timeout=timeout, headers={"Accept": "application/vnd.github+json"})
     response.raise_for_status()
     tags = [tag.get("name") for tag in response.json() if isinstance(tag, dict)]
-    releases = [tag for tag in tags if isinstance(tag, str) and _release_key(tag) is not None]
+    releases = [(key, tag) for tag in tags if isinstance(tag, str) and (key := _release_key(tag)) is not None]
     if not releases:
         raise SchemaError(f"BattINFO lists no release tag at {_TAGS_URL}")
-    return max(releases, key=lambda tag: _release_key(tag) or ()).removeprefix("v")
+    return normalise_release(max(releases)[1])
 
 
 def _latest_cached_release() -> Path | None:
@@ -715,7 +726,7 @@ def _latest_cached_release() -> Path | None:
     """
     from bdf.fetch import cache_dir
 
-    cached: list[tuple[tuple[int, int, int, int, int], Path]] = []
+    cached: list[tuple[Version, Path]] = []
     for path in cache_dir().glob("battinfo-v*"):
         version = _snapshot_version(path)
         key = _release_key(f"v{version}") if version else None
