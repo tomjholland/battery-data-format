@@ -482,10 +482,8 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
     payload = metadata.model_dump(mode="json", exclude_defaults=True)
     if payload:
         payload.setdefault("bdf", {})
-        stamps = _version_stamps(metadata)
-        payload["bdf"].update({k: v for k, v in stamps.items() if v})
-        if stamps["battinfo_version"] is None:
-            payload["bdf"].pop("battinfo_version", None)
+        payload["bdf"].pop("battinfo_version", None)
+        payload["bdf"].update({k: v for k, v in _version_stamps(metadata).items() if v})
         sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         sidecar.unlink(missing_ok=True)
