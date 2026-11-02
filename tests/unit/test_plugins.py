@@ -225,7 +225,7 @@ class TestMaccorPreamble:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             meta = MACCOR_CSV.metadata_parser.parse(p)
-        assert meta.battinfo_test.test.started_at == expected  # type: ignore[union-attr]
+        assert meta.get("battinfo_test.test.started_at") == expected
 
     def test_maccor_export_header_lines(self, tmp_path: Path) -> None:
         """The one-pair-per-line export header stages its name, channel, tester, procedure and start."""
@@ -237,11 +237,15 @@ class TestMaccorPreamble:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             meta = MACCOR_CSV.metadata_parser.parse(p)
-        test = meta.battinfo_test.test
-        assert (test.name, test.protocol_name, test.description) == ("LG_M50.038", "LG.000", "with thermocouple")  # type: ignore[union-attr]
-        assert test.started_at == 1559478480  # type: ignore[union-attr]
-        assert meta.battinfo_channel.channel.label == "38"  # type: ignore[union-attr]
-        assert meta.battinfo_equipment.equipment.name == "Maccor #3"  # type: ignore[union-attr]
+        test = meta.battinfo_test["test"]
+        assert (test["name"], test["protocol_name"], test["description"]) == (
+            "LG_M50.038",
+            "LG.000",
+            "with thermocouple",
+        )
+        assert test["started_at"] == 1559478480
+        assert meta.get("battinfo_channel.channel.label") == "38"
+        assert meta.get("battinfo_equipment.equipment.name") == "Maccor #3"
 
     def test_maccor_export_channel_limits(self, tmp_path: Path) -> None:
         """The Ch./DisCh. lines stage the safety limits; the discharge current limit becomes a negative lower limit."""
@@ -250,9 +254,9 @@ class TestMaccorPreamble:
             "Name:,x,,\nCh. max. V,8.00 V,,\nDisCh. min. V,-2.00 V,,\nCh. max. I,10.000 A,,\n"
             "DisCh. max. I,5.000 A,,\n,,,\nRec,Voltage [V]\n1,3.1\n"
         )
-        safety = MACCOR_CSV.metadata_parser.parse(p).battinfo_test_protocol.safety
-        assert (safety.max_voltage_V, safety.min_voltage_V) == (8.0, -2.0)  # type: ignore[union-attr]
-        assert (safety.max_current_mA, safety.min_current_mA) == (10000.0, -5000.0)  # type: ignore[union-attr]
+        safety = MACCOR_CSV.metadata_parser.parse(p).battinfo_test_protocol["safety"]
+        assert (safety["max_voltage_V"], safety["min_voltage_V"]) == (8.0, -2.0)
+        assert (safety["max_current_mA"], safety["min_current_mA"]) == (10000.0, -5000.0)
 
 
 class TestNovonixPreamble:
@@ -265,15 +269,15 @@ class TestNovonixPreamble:
             "[End Summary]\n[Data]\nDate and Time,Potential (V)\n"
         )
         meta = NOVONIX_CSV.metadata_parser.parse(p, tz="UTC")
-        test = meta.battinfo_test.test
-        assert (test.description, test.protocol_name, test.instrument_name) == (  # type: ignore[union-attr]
+        test = meta.battinfo_test["test"]
+        assert (test["description"], test["protocol_name"], test["instrument_name"]) == (
             "DCIR 0.1C",
             "dcir.pro2",
             "Novonix UHPC",
         )
-        assert test.started_at == 1728671623  # type: ignore[union-attr]
-        assert meta.battinfo_channel.channel.label == "09"  # type: ignore[union-attr]
-        assert meta.battinfo_cell.cell_instance.serial_number is None  # type: ignore[union-attr]
+        assert test["started_at"] == 1728671623
+        assert meta.get("battinfo_channel.channel.label") == "09"
+        assert meta.get("battinfo_cell.cell_instance.serial_number") is None
         assert meta.extras is None
 
 

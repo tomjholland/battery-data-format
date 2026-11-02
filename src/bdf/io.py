@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import polars as pl
 
 from bdf._time_scale import detect_scale_mismatch
+from bdf.battinfo.schema import BATTINFO_SCHEMA, SchemaError
 from bdf.file_utils import open_compressed, strip_compression_suffix
 from bdf.metadata import Metadata
 from bdf.metadata_parsers import BdfSidecarParser
@@ -411,21 +412,27 @@ def _as_polars(df: pl.DataFrame | pl.LazyFrame | pd.DataFrame) -> pl.DataFrame |
     return pl.DataFrame(df)
 
 
+# The `bdf` keys that describe a sidecar's writer, so a save drops each one the
+# caller's object carries before stamping its own: `battinfo_ref` is the
+# 0.2.0rc3 writer's stamp, which no writer states any more.
+_WRITER_STAMPS = ("bdf_version", "ontology_version", "battinfo_version", "battinfo_ref")
+
+
 def _version_stamps() -> dict[str, str | None]:
     """Return the writer-identity stamps a written sidecar carries (GH #106).
 
     Returns:
         ``bdf_version`` (the installed package version), ``ontology_version``
-        (the pinned BDF ontology release), and ``battinfo_ref`` (the upstream
-        commit the bundled BattINFO schemas were fetched at).
+        (the pinned BDF ontology release), and ``battinfo_version`` (the
+        BattINFO release of the loaded schema set the records were checked
+        against).
     """
     import bdf
-    from bdf.battinfo import bundled_ref
 
     return {
         "bdf_version": bdf.__version__,
         "ontology_version": COLUMN_ONTOLOGY.ontology_version or None,
-        "battinfo_ref": bundled_ref(),
+        "battinfo_version": BATTINFO_SCHEMA.version,
     }
 
 
@@ -433,12 +440,15 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
     """Write ``metadata`` to ``sidecar``, or delete the sidecar where it carries nothing.
 
     A written sidecar is stamped with the writer's versions (GH #106):
-    ``bdf.bdf_version``, ``bdf.ontology_version``, and ``bdf.battinfo_ref``.
+    ``bdf.bdf_version``, ``bdf.ontology_version``, and ``bdf.battinfo_version``.
     The stamps identify the file's writer, so they overwrite any stamps the
     caller's object carries, and a read-then-save records the version that
-    performed the save. The caller's object is not modified. A ``Metadata``
-    that carries nothing still writes no sidecar: the stamps describe a
-    sidecar, so they never create one.
+    performed the save. A stale writer stamp the caller's object carries,
+    ``battinfo_ref`` included, is dropped even where this writer states no
+    value for it. The entities are checked first, so a value written into an
+    entity's dict directly never reaches the file unchecked. The caller's
+    object is not modified. A ``Metadata`` that carries nothing still writes
+    no sidecar: the stamps describe a sidecar, so they never create one.
 
     Args:
         sidecar: Path of the ``.metadata.json`` file beside the artifact.
@@ -446,10 +456,15 @@ def _write_sidecar(sidecar: Path, metadata: Metadata) -> None:
             defaults reach the file, so a ``Metadata`` that carries nothing
             writes no sidecar at all, and deletes one the target already had.
     """
+    refused = metadata.check()
+    if refused:
+        raise SchemaError(f"{sidecar} not written: " + "; ".join(refused))
     payload = metadata.model_dump(mode="json", exclude_defaults=True)
     if payload:
-        payload.setdefault("bdf", {})
-        payload["bdf"].update({k: v for k, v in _version_stamps().items() if v})
+        info = payload.setdefault("bdf", {})
+        for stale in _WRITER_STAMPS:
+            info.pop(stale, None)
+        info.update({k: v for k, v in _version_stamps().items() if v})
         sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         sidecar.unlink(missing_ok=True)

@@ -97,31 +97,27 @@ build the docs.
 ## BattINFO-derived content (do not edit by hand)
 
 [BattINFO](https://github.com/BIG-MAP/BattINFO) is the source of truth for the
-managed schema files under `src/bdf/data/battinfo/schemas/` (nine today). The model package
-`bdf.battinfo.generated` renders from those files alone, and
-`src/bdf/data/battinfo/VERSION` stamps the upstream commit they came from.
+managed schema files under `src/bdf/data/battinfo/schemas/` (nine today), and
+`src/bdf/data/battinfo/VERSION` names the upstream release they are a snapshot
+of. The bundle pins published releases only. The `Metadata` entities are
+checked against the loaded schema at run time, so no code is generated from
+these files. They are the default set a user can replace
+(`BATTINFO_SCHEMA.load_latest`, `load_version`, `load_dir`, as for the BDF
+ontology).
 
 - To change a schema, open a PR on the **BattINFO repo**, not here.
-- A `freshness` test (`test_bundle_matches_the_upstream_default_branch`) fails
-  when the bundle differs from upstream `main`. The comparison reads parsed
-  content, so an upstream commit that reformats one of the managed files, or that
-  leaves `assets/schemas/` alone, keeps it green. Only a real schema change
-  turns it red. Run `python scripts/update_battinfo.py --check` to see the same
-  comparison as a report.
-- The `freshness` marker covers every test that compares bundled content
-  against upstream, here and for the ontology snapshot. Those tests read the
-  repository and never the interpreter, so CI runs them once in the
-  `freshness-tests` job and the version matrix skips them. That job gates the
-  rest of the suite, because a stale bundle invalidates every result the other
-  jobs produce. Run it locally with `uv run --all-extras pytest -m freshness`.
-- To clear a red check, run `python scripts/update_battinfo.py main` and commit
-  the result. The script fetches the managed files, stamps the commit that `main`
-  resolves to, and regenerates the model package. Review that diff: an upstream
-  rename can break a field path that `tests/unit/test_battinfo_contract.py`
-  pins.
-- Never edit `bdf/battinfo/generated/` directly. CI compares the committed
-  package against a fresh render (`datamodel-codegen --check`), and a hand
-  edit fails that check.
+- To move the bundle to another release, run `bdf-update-battinfo VERSION`
+  (for example `bdf-update-battinfo 0.8.0`), or `bdf-update-battinfo` alone
+  for the latest release, and commit the result, as `bdf-update-snapshot`
+  does for the ontology. Review that diff: an
+  upstream rename can break a field path the vendor parsers write
+  (`src/bdf/metadata_targets.py`).
+- A `freshness` test (`test_bundled_snapshot_matches_its_declared_release`)
+  refetches the release `VERSION` names and fails if the bundle differs from
+  it. CI runs the `freshness` tests once, in the `freshness-tests` job; run
+  them locally with `uv run --all-extras pytest -m freshness`.
+- To add an entity, add its field and document to `_ENTITY_DOCS` in
+  `src/bdf/metadata.py` and declare the field on `Metadata`.
 
 ## Reference artifacts are byte-exact
 

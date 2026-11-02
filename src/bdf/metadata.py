@@ -1,20 +1,25 @@
 # src/bdf/metadata.py
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
+from urllib.parse import urljoin
 
-from pydantic import Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
-from bdf.battinfo._base import _RecordModel
-from bdf.battinfo.generated.cell_instance_schema import BattinfoCellInstance
-from bdf.battinfo.generated.channel_schema import BattinfoChannelInstance
-from bdf.battinfo.generated.dataset_schema import BattinfoDatasetSchemaOrgAligned
-from bdf.battinfo.generated.equipment_schema import BattinfoEquipmentInstance
-from bdf.battinfo.generated.test_protocol_schema import BattinfoTestProtocol
-from bdf.battinfo.generated.test_schema import BattinfoTest
+from bdf.battinfo import document
+from bdf.battinfo.schema import BATTINFO_SCHEMA, SchemaError
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -24,13 +29,90 @@ except Exception:  # pragma: no cover
 
 from bdf import spec
 
-# The generated root class carries the schema title verbatim; the short name
-# is the public one, matching the record field it types.
-BattinfoDataset = BattinfoDatasetSchemaOrgAligned
+# The one registry of BattINFO entity records: each `Metadata` field, and the
+# bundle-relative document its root record is bounded by. The field defaults,
+# the `EntityRecord` field markers, and the metadata targets all read this
+# mapping, so an entity is added here and declared once as a field.
+_ENTITY_DOCS: dict[str, str] = {
+    "battinfo_test": "test.schema.json",
+    "battinfo_cell": "cell-instance.schema.json",
+    "battinfo_channel": "channel.schema.json",
+    "battinfo_equipment": "equipment.schema.json",
+    "battinfo_test_protocol": "test-protocol.schema.json",
+    "battinfo_dataset": "dataset.schema.json",
+}
+
+
+def _absolute_refs(node: Any, base_id: str) -> Any:
+    """Copy a schema node, every ``$ref`` written out against its document's ``$id``.
+
+    Pydantic rewrites a ``#/$defs/...`` reference in a JSON Schema it embeds, so
+    a document described inside ``Metadata``'s schema carries absolute ones.
+
+    Args:
+        node: The schema node, list, or leaf value to copy.
+        base_id: The ``$id`` the node's references resolve against.
+
+    Returns:
+        The copy, carrying absolute references alone.
+    """
+    if isinstance(node, dict):
+        return {
+            key: urljoin(base_id, value) if key == "$ref" and isinstance(value, str) else _absolute_refs(value, base_id)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_absolute_refs(item, base_id) for item in node]
+    return node
+
+
+def _entity_field(name: str) -> Any:
+    """Declare one entity field: a plain dict, described by its loaded BattINFO document.
+
+    Args:
+        name: The field's own name, a key of `_ENTITY_DOCS`.
+
+    Returns:
+        The pydantic field declaration, defaulting to an empty dict. The
+        field's JSON Schema is the document's own content in the loaded set.
+    """
+    doc_name = _ENTITY_DOCS[name]
+
+    def describe(schema: dict[str, Any]) -> None:
+        doc = BATTINFO_SCHEMA.docs[doc_name]
+        schema.update(_absolute_refs(doc, doc["$id"]))
+
+    return Field(default_factory=dict, json_schema_extra=describe)
+
+
+class _RecordModel(BaseModel):
+    """Shared configuration and serialisation for the metadata document models."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise this record to a plain dict in BattINFO shape.
+
+        Returns:
+            The model dumped in JSON mode with ``exclude_defaults=True``.
+            Every declared field's default is ``None`` or a factory that
+            builds an empty model or record, and each compares equal to its
+            own default by value, so a field left untouched, and a section
+            nothing filled, are both absent from the result.
+        """
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class BdfReadInfo(_RecordModel):
-    """BDF-owned read audit facts, kept out of the BattINFO records."""
+    """BDF-owned read audit facts, kept out of the BattINFO records.
+
+    The writer stamps (``bdf_version``, ``ontology_version``,
+    ``battinfo_version``) describe the sidecar file itself, so ``save()``
+    overwrites them on every sidecar it writes.
+
+    A field an earlier release wrote stays declared, deprecated, so a sidecar
+    that release wrote still reads.
+    """
 
     source: str | None = None
     time_reconciliation: list[dict] | None = None
@@ -41,9 +123,16 @@ class BdfReadInfo(_RecordModel):
     that performed the save, not the one that wrote the file it read."""
     ontology_version: str | None = None
     """The BDF ontology release the writer's column spec was pinned to."""
-    battinfo_ref: str | None = None
-    """The upstream BattINFO commit the writer's bundled schemas were fetched
-    at (a release tag once upstream versions its schemas)."""
+    battinfo_version: str | None = None
+    """The BattINFO release of the schema set the writer's records were
+    bounded by."""
+    battinfo_ref: str | None = Field(
+        default=None,
+        deprecated="battinfo_ref is the BattINFO commit a 0.2.0rc3 writer's bundle was fetched at; "
+        "use battinfo_version, the release the records follow.",
+    )
+    """Written by bdf 0.2.0rc3: the upstream BattINFO commit the writer's
+    bundled schemas were fetched at. A writer stamp, so ``save()`` drops it."""
 
 
 class Metadata(_RecordModel):
@@ -51,38 +140,35 @@ class Metadata(_RecordModel):
     read audit section, the verbatim source a parser read, and the values a
     rule staged deliberately.
 
-    Each record is the generated root model of one BattINFO entity
-    (:mod:`bdf.battinfo.generated`), and the nesting and property names are
-    BattINFO's own (``meta.battinfo_test.test.instrument_name``, not a
-    flattened facade), so a caller who already speaks BattINFO finds nothing
-    to translate. A plugin fills only the fields it can derive, and every
-    other declared leaf field keeps its default. The saved sidecar serialises
-    this same shape.
+    Each entity is a plain dict in BattINFO's own shape and nesting
+    (``meta.battinfo_test["test"]["instrument_name"]``, not a flattened
+    facade), so a caller who already speaks BattINFO finds nothing to
+    translate, and the saved sidecar serialises the same dicts. A plugin fills
+    only the fields it can derive.
 
-    Every record field auto-constructs, so a caller assigns a leaf on a fresh
-    instance with no ``None`` guard. A leaf of a plain scalar type reads as
-    ``None`` while unfilled. A field whose type is a model does not: it
-    defaults to an empty instance of that model, which covers each nested
-    section and the wrapper-typed leaves ``expires_at``, ``manufactured_at``,
-    ``commissioned_at``, and ``Quantity.value``. Read ``.root`` on a wrapper
-    to reach the value it holds.
+    Every entity is checked as a whole document against the loaded BattINFO
+    schema (:mod:`bdf.battinfo.document`) when it is validated or assigned.
+    :meth:`set` writes one value by its path, creating the mappings above it
+    and checking it at once; :meth:`get` reads one; :meth:`check` lists every
+    refused value. A value written into a dict directly is checked only at
+    the next validation, :meth:`check`, or ``save()``.
     """
 
     # An upstream schema sets `additionalProperties: false` at its root, so
     # `bdf`, `raw`, and `extras` cannot live inside a record. Each wrapper key
     # joins `battinfo_` to the upstream entity type, which also keeps a
     # sidecar document distinct from a record document.
-    battinfo_test: BattinfoTest = Field(default_factory=BattinfoTest)
+    battinfo_test: dict[str, Any] = _entity_field("battinfo_test")
     """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
-    battinfo_cell: BattinfoCellInstance = Field(default_factory=BattinfoCellInstance)
+    battinfo_cell: dict[str, Any] = _entity_field("battinfo_cell")
     """The physical cell the test ran on, and the cell type it derives from."""
-    battinfo_channel: BattinfoChannelInstance = Field(default_factory=BattinfoChannelInstance)
+    battinfo_channel: dict[str, Any] = _entity_field("battinfo_channel")
     """The one channel of the equipment unit that ran the test."""
-    battinfo_equipment: BattinfoEquipmentInstance = Field(default_factory=BattinfoEquipmentInstance)
+    battinfo_equipment: dict[str, Any] = _entity_field("battinfo_equipment")
     """The physical equipment unit that ran the test, a named cycler for example."""
-    battinfo_test_protocol: BattinfoTestProtocol = Field(default_factory=BattinfoTestProtocol)
+    battinfo_test_protocol: dict[str, Any] = _entity_field("battinfo_test_protocol")
     """The reusable protocol the test followed: its typed steps, and links to the files that state them."""
-    battinfo_dataset: BattinfoDataset = Field(default_factory=BattinfoDataset)
+    battinfo_dataset: dict[str, Any] = _entity_field("battinfo_dataset")
     """The dataset this file belongs to: its distributions (raw and processed files,
     checksums, formats), identifiers, and links to the cell and test that produced it.
     Mirrors a pre-1.0 upstream schema and may evolve with it. Nothing fills this
@@ -106,6 +192,118 @@ class Metadata(_RecordModel):
     key no rule maps is preserved by ``raw`` instead. It never holds a failed
     value, because such a value raises. ``None`` when a read staged nothing
     here. Written by `save()` and restored on a later read."""
+
+    @field_validator(*_ENTITY_DOCS, mode="after")
+    @classmethod
+    def _check_entity(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        """Prune, coerce, and check one entity's data against its whole document.
+
+        Args:
+            value: The entity's data.
+            info: The validation info, naming the field.
+
+        Returns:
+            The pruned, coerced copy.
+
+        Raises:
+            ValidationError: The loaded set refuses a value, located at it
+                (``battinfo_test.test.started_at``).
+        """
+        entity = info.field_name or ""
+        schema = BATTINFO_SCHEMA
+        doc_name = _ENTITY_DOCS[entity]
+        data = document.coerce(schema, doc_name, document.prune(value))
+        errors = document.refusals(schema, doc_name, data)
+        if errors:
+            raise ValidationError.from_exception_data(
+                entity,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError(
+                            "battinfo_schema",
+                            "BattINFO schema {version} refuses this value: {reason}",
+                            {"version": schema.label, "reason": error.message},
+                        ),
+                        loc=tuple(error.absolute_path),
+                        input=error.instance,
+                    )
+                    for error in errors
+                ],
+            )
+        return data
+
+    def set(self, path: str | Sequence[str | int], value: Any) -> None:
+        """Coerce, check, and store one value, creating the mappings above it.
+
+        The whole entity is checked, so jsonschema decides every choice the
+        value sits inside. A refusal elsewhere in the entity does not block
+        the write.
+
+        Args:
+            path: The entity field, then the keys below it:
+                ``"battinfo_test.test.name"``, or a sequence where a key holds
+                a dot or indexes a list.
+            value: The value to store. ``None`` unsets it.
+
+        Raises:
+            AttributeError: The path names no entity.
+            SchemaError: A key above the value holds no mapping, or the
+                schema refuses the value.
+        """
+        entity, *keys = path.split(".") if isinstance(path, str) else list(path)
+        doc_name = _ENTITY_DOCS.get(str(entity))
+        if doc_name is None:
+            raise AttributeError(f"{entity!r} names no BattINFO entity")
+        if not keys:
+            setattr(self, str(entity), value)
+            return
+        data = copy.deepcopy(getattr(self, str(entity)))
+        parent: Any = data
+        for depth, key in enumerate(keys[:-1]):
+            parent = parent.setdefault(key, {}) if isinstance(parent, dict) else parent[key]
+            if not isinstance(parent, (dict, list)):
+                where = ".".join(str(part) for part in (entity, *keys[: depth + 1]))
+                raise SchemaError(f"{where} holds no mapping, so nothing can be set below it")
+        parent[keys[-1]] = value
+        schema = BATTINFO_SCHEMA
+        data = document.coerce(schema, doc_name, document.prune(data))
+        errors = [error for error in document.refusals(schema, doc_name, data) if document.concerns(error, keys)]
+        if errors:
+            raise SchemaError(document.message(schema, str(entity), errors[0]))
+        self.__dict__[str(entity)] = data
+
+    def get(self, path: str | Sequence[str | int], default: Any = None) -> Any:
+        """Read one value by its path, or ``default`` where nothing is set there.
+
+        Args:
+            path: The entity field, then the keys below it, as for :meth:`set`.
+            default: What to return where the path holds nothing.
+
+        Returns:
+            The stored value, or ``default``.
+        """
+        entity, *keys = path.split(".") if isinstance(path, str) else list(path)
+        node: Any = getattr(self, str(entity))
+        for key in keys:
+            try:
+                node = node[key]
+            except (KeyError, IndexError, TypeError):
+                return default
+        return node
+
+    def check(self) -> list[str]:
+        """Check every entity against its whole document.
+
+        Returns:
+            One line per refused value, naming its path and the reason. An
+            empty list means every entity follows the schema set.
+        """
+        schema = BATTINFO_SCHEMA
+        return [
+            document.message(schema, entity, error)
+            for entity, doc_name in _ENTITY_DOCS.items()
+            for error in document.refusals(schema, doc_name, getattr(self, entity))
+        ]
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

@@ -14,11 +14,6 @@ from polars.testing import assert_frame_equal, assert_series_equal
 from pydantic import ValidationError
 
 from bdf import (
-    BattinfoCellInstance,
-    BattinfoChannelInstance,
-    BattinfoEquipmentInstance,
-    BattinfoTest,
-    BattinfoTestProtocol,
     BDFMetadataError,
     BdfReadInfo,
     BDFValidationError,
@@ -824,11 +819,11 @@ def test_read_returns_typed_metadata_with_five_records(tmp_path: Path) -> None:
     _, meta = io.read(p)
     assert isinstance(meta, Metadata)
     assert meta.bdf.source == "bdf_csv"
-    assert isinstance(meta.battinfo_test, BattinfoTest)
-    assert isinstance(meta.battinfo_cell, BattinfoCellInstance)
-    assert isinstance(meta.battinfo_channel, BattinfoChannelInstance)
-    assert isinstance(meta.battinfo_equipment, BattinfoEquipmentInstance)
-    assert isinstance(meta.battinfo_test_protocol, BattinfoTestProtocol)
+    assert isinstance(meta.battinfo_test, dict)
+    assert isinstance(meta.battinfo_cell, dict)
+    assert isinstance(meta.battinfo_channel, dict)
+    assert isinstance(meta.battinfo_equipment, dict)
+    assert isinstance(meta.battinfo_test_protocol, dict)
     assert meta.raw is None
     assert meta.extras is None
 
@@ -850,20 +845,21 @@ def test_save_metadata(tmp_path: Path) -> None:
     metadata = json.loads(p_meta.read_text())
     assert metadata["bdf"]["source"] == "bdf_parquet"
     # every written sidecar also carries the writer's version stamps (GH #106)
-    assert set(metadata["bdf"]) == {"source", "bdf_version", "ontology_version", "battinfo_ref"}
+    assert set(metadata["bdf"]) == {"source", "bdf_version", "ontology_version", "battinfo_version"}
 
 
 def test_metadata_roundtrips_through_save_and_read(tmp_path: Path) -> None:
     """A fully populated Metadata round-trips through save() and read() with no conversion."""
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     original = Metadata()
-    original.battinfo_test.test.started_at = _PLACEHOLDER_EPOCH  # type: ignore[union-attr]
-    original.battinfo_test.test.instrument_name = "Arbin"  # type: ignore[union-attr]
+    original.set("battinfo_test.test.started_at", _PLACEHOLDER_EPOCH)
+    original.set("battinfo_test.test.instrument_name", "Arbin")
     # occurred_at accepts either an int or a raw string; a re-run of AbsoluteTimeNormalization
     # would coerce or reject this ISO-shaped string, so it catches a restore that normalises.
-    original.battinfo_test.test.conformance.deviations = [  # type: ignore[union-attr]
-        {"occurred_at": "2024-01-15T00:00:00Z", "category": "other", "type": "manual review flag"}
-    ]
+    original.set(
+        "battinfo_test.test.conformance.deviations",
+        [{"occurred_at": "2024-01-15T00:00:00Z", "category": "other", "type": "manual review flag"}],
+    )
     original.raw = {"vendor_key": "vendor_value", "nested": {"a": None}}
     original.extras = {"rig_bay": "B7", "nested": {"a": 1}}
 
@@ -893,7 +889,7 @@ def test_save_without_metadata_refuses_an_existing_sidecar(tmp_path: Path) -> No
     other = pl.DataFrame({"Test Time / s": [1.0], "Voltage / V": [3.6], "Current / A": [0.2]})
     p = tmp_path / "data.bdf.csv"
     original = Metadata()
-    original.battinfo_test.test.instrument_name = "Arbin"  # type: ignore[union-attr]
+    original.set("battinfo_test.test.instrument_name", "Arbin")
     io.save(df, p, metadata=original)
     sidecar = p.with_suffix(".metadata.json")
 
@@ -903,7 +899,7 @@ def test_save_without_metadata_refuses_an_existing_sidecar(tmp_path: Path) -> No
     # The refusal precedes the table write, so neither file changed.
     table, meta = io.read(p)
     assert_frame_equal(df, table)
-    assert meta.battinfo_test.test.instrument_name == "Arbin"  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.instrument_name") == "Arbin"
 
 
 def test_save_without_metadata_writes_where_no_sidecar_exists(tmp_path: Path) -> None:
@@ -922,14 +918,14 @@ def test_empty_metadata_clears_a_previous_sidecar(tmp_path: Path) -> None:
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     p = tmp_path / "data.bdf.csv"
     original = Metadata()
-    original.battinfo_test.test.instrument_name = "Arbin"  # type: ignore[union-attr]
+    original.set("battinfo_test.test.instrument_name", "Arbin")
     io.save(df, p, metadata=original)
 
     io.save(df, p, metadata=Metadata())
 
     assert not p.with_suffix(".metadata.json").exists()
     _, meta = io.read(p)
-    assert meta.battinfo_test.test.instrument_name is None  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.instrument_name") is None
 
 
 def test_reserved_sidecar_never_self_nests(tmp_path: Path) -> None:
@@ -946,20 +942,27 @@ def test_reserved_sidecar_never_self_nests(tmp_path: Path) -> None:
         io.save(df, p, metadata=meta)
 
 
-def test_stated_null_on_a_wrapper_typed_leaf_roundtrips(tmp_path: Path) -> None:
-    """A curated null on a wrapper-typed leaf stays null through repeated save/read cycles."""
+def test_a_stated_null_on_a_choice_typed_leaf_reads_as_unset(tmp_path: Path) -> None:
+    """A curated null on a choice-typed leaf reads as unset, same as a leaf neither side ever stated.
+
+    A choice-typed leaf holds its value directly, so a stated null and
+    an absent leaf are the same `None`, and a re-save omits it either way.
+    """
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     p = tmp_path / "data.bdf.csv"
     io.save(df, p)
     sidecar = p.with_suffix(".metadata.json")
-    sidecar.write_text(json.dumps({"battinfo_equipment": {"equipment": {"commissioned_at": None}}}))
+    # the extras keep the re-saved metadata from carrying nothing, which would delete the sidecar
+    sidecar.write_text(
+        json.dumps({"battinfo_equipment": {"equipment": {"commissioned_at": None}}, "extras": {"rig_bay": "B3"}})
+    )
 
     for _ in range(2):
         _, meta = io.read(p)
-        assert meta.battinfo_equipment.equipment.commissioned_at is None  # type: ignore[union-attr]
+        assert meta.get("battinfo_equipment.equipment.commissioned_at") is None
         io.save(df, p, metadata=meta)
         payload = json.loads(sidecar.read_text())
-        assert payload["battinfo_equipment"]["equipment"]["commissioned_at"] is None
+        assert "battinfo_equipment" not in payload
         # a leaf neither side ever stated does not leak a matching bare null
         assert "expires_at" not in payload.get("battinfo_cell", {}).get("cell_instance", {})
 
@@ -995,8 +998,8 @@ def test_reserved_sidecar_suppresses_the_plugin_parser(tmp_path: Path) -> None:
     sidecar = p.with_suffix(".metadata.json")
     sidecar.write_text(json.dumps({"battinfo_test": {"test": {"instrument_name": "Arbin"}}}))
     _, meta = io.read(p, plugin=plugin)
-    assert meta.battinfo_test.test.instrument_name == "Arbin"  # type: ignore[union-attr]
-    assert meta.battinfo_test.test.started_at is None  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.instrument_name") == "Arbin"
+    assert meta.get("battinfo_test.test.started_at") is None
     assert meta.raw is None  # type: ignore[attr-defined]
 
 
@@ -1008,7 +1011,7 @@ def test_plugin_parser_runs_when_no_sidecar_exists(tmp_path: Path) -> None:
 
     _, meta = io.read(p, plugin=plugin)
     expected = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc).timestamp()
-    assert meta.battinfo_test.test.started_at == pytest.approx(expected, abs=1e-6)  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.started_at") == pytest.approx(expected, abs=1e-6)
     assert "~Start of Test: 2024-01-15 00:00:00" in meta.raw  # type: ignore[attr-defined,operator]
 
 
@@ -1039,7 +1042,7 @@ def test_read_rule_never_matches_inside_table(tmp_path: Path) -> None:
     plugin = Plugin(table_parser=DelimTxtParser(normalizer=TableNormalizer()), metadata_parser=metadata_parser)
 
     _, meta = io.read(p, plugin=plugin)
-    assert meta.battinfo_test.test.instrument_name is None  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.instrument_name") is None
 
 
 def test_read_no_preamble_leaves_raw_none(tmp_path: Path) -> None:
@@ -1060,7 +1063,7 @@ def test_read_no_preamble_leaves_raw_none(tmp_path: Path) -> None:
 
     _, meta = io.read(p, plugin=plugin)
     assert meta.raw is None  # type: ignore[attr-defined]
-    assert meta.battinfo_test.test.started_at is None  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.started_at") is None
 
 
 def test_save_sidecar_raw_excludes_table_rows(tmp_path: Path) -> None:
@@ -1100,7 +1103,7 @@ def test_read_unlocatable_boundary_keeps_the_whole_head(tmp_path: Path) -> None:
     _, meta = io.read(p, plugin=plugin, validate=False)
     assert meta.raw == text  # type: ignore[attr-defined]
     expected = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc).timestamp()
-    assert meta.battinfo_test.test.started_at == pytest.approx(expected, abs=1e-6)  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.started_at") == pytest.approx(expected, abs=1e-6)
 
 
 def test_read_sidecar_written_before_the_trim_restores_unchanged(tmp_path: Path) -> None:
@@ -1221,7 +1224,16 @@ def test_unrecognised_sidecar_key_fails_the_read(tmp_path: Path) -> None:
     with pytest.raises(BDFMetadataError, match="not_a_real_field"):
         io.read(p)
 
-    sidecar.write_text(json.dumps({"battinfo_test": {"test": {"started_at": "not-an-int"}}}))
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    sidecar.write_text(
+        json.dumps(
+            {
+                "battinfo_test": {"test": {"started_at": "not-an-int"}},
+                "bdf": {"battinfo_version": BATTINFO_SCHEMA.version},
+            }
+        )
+    )
     with pytest.raises(BDFMetadataError):
         io.read(p)
 
@@ -1303,15 +1315,13 @@ def test_one_override_covers_both_paths(tmp_path: Path) -> None:
     expected_table = datetime(2024, 3, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp()
     expected_meta = datetime(2024, 3, 2, 8, 0, 0, tzinfo=timezone.utc).timestamp()
     assert table["Unix Time / s"][0] == pytest.approx(expected_table, abs=1e-6)
-    assert meta.battinfo_test.test.started_at == pytest.approx(expected_meta, abs=1e-6)  # type: ignore[union-attr]
+    assert meta.get("battinfo_test.test.started_at") == pytest.approx(expected_meta, abs=1e-6)
 
     table_declared, meta_declared = read(p, plugin=plugin, validate=False)
     expected_table_declared = datetime(2024, 2, 3, 12, 0, 0, tzinfo=timezone.utc).timestamp()
     expected_meta_declared = datetime(2024, 2, 3, 8, 0, 0, tzinfo=timezone.utc).timestamp()
     assert table_declared["Unix Time / s"][0] == pytest.approx(expected_table_declared, abs=1e-6)
-    assert meta_declared.battinfo_test.test.started_at == pytest.approx(  # type: ignore[union-attr]
-        expected_meta_declared, abs=1e-6
-    )
+    assert meta_declared.get("battinfo_test.test.started_at") == pytest.approx(expected_meta_declared, abs=1e-6)
 
 
 def test_choosing_an_order_reads_no_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1350,7 +1360,7 @@ def test_no_override_changes_nothing_on_read(tmp_path: Path) -> None:
     table_none, meta_none = read(p, plugin=plugin, validate=False, day_month_order=None)  # type: ignore[call-arg]
     table_omitted, meta_omitted = read(p, plugin=plugin, validate=False)
     assert_frame_equal(table_none, table_omitted)
-    assert meta_none.battinfo_test.test.started_at == meta_omitted.battinfo_test.test.started_at  # type: ignore[union-attr]
+    assert meta_none.get("battinfo_test.test.started_at") == meta_omitted.get("battinfo_test.test.started_at")
 
 
 def test_table_parser_read_accepts_day_month_order(tmp_path: Path) -> None:
@@ -1372,22 +1382,22 @@ def test_table_parser_read_accepts_day_month_order(tmp_path: Path) -> None:
 
 
 def test_save_stamps_writer_versions_into_the_sidecar(tmp_path: Path) -> None:
-    """A written sidecar carries bdf_version, ontology_version, and battinfo_ref,
+    """A written sidecar carries bdf_version, ontology_version, and battinfo_version,
     and stamping never mutates the caller's object."""
     df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
     meta = Metadata()
-    meta.battinfo_test.test.name = "cell-1"  # type: ignore[union-attr]
+    meta.set("battinfo_test.test.name", "cell-1")
     p = tmp_path / "data.bdf.csv"
 
     io.save(df, p, metadata=meta)
 
     import bdf
-    from bdf.battinfo import bundled_ref
+    from bdf.battinfo import BATTINFO_SCHEMA
 
     doc = json.loads(p.with_suffix(".metadata.json").read_text(encoding="utf-8"))
     assert doc["bdf"]["bdf_version"] == bdf.__version__
     assert doc["bdf"]["ontology_version"]
-    assert doc["bdf"]["battinfo_ref"] == bundled_ref()
+    assert doc["bdf"]["battinfo_version"] == BATTINFO_SCHEMA.version == "0.8.0rc2"
     assert meta.bdf.bdf_version is None
 
 
@@ -1421,3 +1431,60 @@ def test_empty_metadata_is_not_stamped_into_existence(tmp_path: Path) -> None:
     io.save(df, p, metadata=Metadata())
 
     assert not p.with_suffix(".metadata.json").exists()
+
+
+def test_a_stale_writer_stamp_is_dropped_where_the_writer_states_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer stamp the caller's object carries never survives a save, even
+    where this writer has no value of its own for it."""
+    stamps = {"bdf_version": "9.9.9", "ontology_version": None, "battinfo_version": None}
+    monkeypatch.setattr(io, "_version_stamps", lambda: stamps)
+    df = pl.DataFrame({"Test Time / s": [0.0], "Voltage / V": [3.7], "Current / A": [0.1]})
+    meta = Metadata(extras={"rig_bay": "B3"})
+    meta.bdf.ontology_version = "1.0.0"
+    meta.bdf.battinfo_version = "0.7.0"
+    p = tmp_path / "data.bdf.csv"
+
+    io.save(df, p, metadata=meta)
+
+    doc = json.loads(p.with_suffix(".metadata.json").read_text(encoding="utf-8"))
+    assert doc["bdf"]["bdf_version"] == "9.9.9"
+    assert "ontology_version" not in doc["bdf"]
+    assert "battinfo_version" not in doc["bdf"]
+
+
+# ---------------------------------------------------------------------------
+# Sidecars written by earlier releases still read (one fixture per release)
+# ---------------------------------------------------------------------------
+
+_SIDECARS = Path(__file__).parent.parent / "data" / "sidecars"
+
+
+def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again(tmp_path: Path) -> None:
+    """A sidecar bdf 0.2.0rc3 wrote reads with no warning, keeps its records
+    and extras through a save, and loses only its writer stamps, the
+    deprecated ``battinfo_ref`` among them."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        df, meta = io.read(_SIDECARS / "0.2.0rc3" / "data.bdf.csv")
+
+    assert meta.get("battinfo_test.test.name") == "cell-1 formation"
+    assert meta.extras == {"rig_bay": "B3"}
+    with pytest.warns(DeprecationWarning, match="battinfo_version"):
+        assert meta.bdf.battinfo_ref == "eda462993ae43a64706e326253dddb44be100923"
+
+    p = tmp_path / "data.bdf.csv"
+    io.save(df, p, metadata=meta)
+    _, restored = io.read(p)
+
+    import bdf
+    from bdf.battinfo import BATTINFO_SCHEMA
+
+    doc = json.loads(p.with_suffix(".metadata.json").read_text(encoding="utf-8"))
+    assert "battinfo_ref" not in doc["bdf"]
+    assert doc["bdf"]["source"] == "bdf_csv"
+    assert doc["bdf"]["bdf_version"] == bdf.__version__
+    assert doc["bdf"]["battinfo_version"] == BATTINFO_SCHEMA.version
+    assert restored.battinfo_test == meta.battinfo_test
+    assert restored.extras == meta.extras
