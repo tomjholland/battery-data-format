@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 # Fail the warm if the primed cache grows beyond this, to stay clear of
@@ -105,6 +106,37 @@ def warm(urls: list[str], max_bytes: int = _MAX_CACHE_BYTES) -> None:
             )
 
 
+def _warm_releases(label: str, versions: tuple[str, ...], fetch_one: Callable[[str], Path], max_bytes: int) -> int:
+    """Fetch each pinned release with ``fetch_one``, keeping the running total under ``max_bytes``.
+
+    Args:
+        label: The release kind, for the messages (e.g. ``"ontology"``).
+        versions: The releases to fetch.
+        fetch_one: Fetches one release into the cache and returns the file or
+            directory it wrote.
+        max_bytes: Cumulative byte ceiling, shared with ``warm``'s URL total.
+
+    Returns:
+        Total bytes written across all fetched releases.
+    """
+    total = 0
+    for version in versions:
+        try:
+            dest = fetch_one(version)
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"ERROR: {label} fetch failed for release {version!r}: {e}")
+        files = [p for p in dest.rglob("*") if p.is_file()] if dest.is_dir() else [dest]
+        total += sum(p.stat().st_size for p in files)
+        print(f"  cached: {label} release {version} -> {dest}")
+        if total > max_bytes:
+            sys.exit(
+                f"ERROR: warmed {label} cache reached {total / 1024**3:.2f} GiB, "
+                f"exceeding the {max_bytes / 1024**3:.2f} GiB limit "
+                f"(after fetching release {version})."
+            )
+    return total
+
+
 def warm_ontology_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACHE_BYTES) -> int:
     """Fetch each pinned ontology release into the versioned ontology cache.
 
@@ -119,23 +151,12 @@ def warm_ontology_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACH
     Returns:
         Total bytes written across all fetched versions.
     """
-    cache_dir = _ontology_cache_dir()
-    total = 0
-    for version in versions:
-        dest = cache_dir / f"bdf-ontology-v{version}.ttl"
-        try:
-            ColumnOntology.get_snapshot(dest=dest, version=version)
-        except Exception as e:  # noqa: BLE001
-            sys.exit(f"ERROR: ontology fetch failed for version {version!r}: {e}")
-        total += dest.stat().st_size
-        print(f"  cached: ontology release {version} -> {dest}")
-        if total > max_bytes:
-            sys.exit(
-                f"ERROR: warmed ontology cache reached {total / 1024**3:.2f} GiB, "
-                f"exceeding the {max_bytes / 1024**3:.2f} GiB limit "
-                f"(after fetching version {version})."
-            )
-    return total
+    return _warm_releases(
+        "ontology",
+        versions,
+        lambda v: ColumnOntology.get_snapshot(dest=_ontology_cache_dir() / f"bdf-ontology-v{v}.ttl", version=v),
+        max_bytes,
+    )
 
 
 def warm_battinfo_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACHE_BYTES) -> int:
@@ -152,22 +173,12 @@ def warm_battinfo_versions(versions: tuple[str, ...], max_bytes: int = _MAX_CACH
     Returns:
         Total bytes written across all fetched releases.
     """
-    total = 0
-    for version in versions:
-        dest = _release_cache_dir(version)
-        try:
-            BattinfoSchema.get_snapshot(dest=dest, version=version)
-        except Exception as e:  # noqa: BLE001
-            sys.exit(f"ERROR: BattINFO fetch failed for release {version!r}: {e}")
-        total += sum(path.stat().st_size for path in dest.rglob("*") if path.is_file())
-        print(f"  cached: BattINFO release {version} -> {dest}")
-        if total > max_bytes:
-            sys.exit(
-                f"ERROR: warmed BattINFO cache reached {total / 1024**3:.2f} GiB, "
-                f"exceeding the {max_bytes / 1024**3:.2f} GiB limit "
-                f"(after fetching release {version})."
-            )
-    return total
+    return _warm_releases(
+        "BattINFO",
+        versions,
+        lambda v: BattinfoSchema.get_snapshot(dest=_release_cache_dir(v), version=v),
+        max_bytes,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
