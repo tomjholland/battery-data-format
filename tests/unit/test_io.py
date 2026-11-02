@@ -1463,17 +1463,9 @@ def _cache_release(cache: Path, version: str) -> None:
         cache: The ``BDF_CACHE_DIR`` directory.
         version: The release the snapshot's ``VERSION`` names.
     """
-    import shutil
+    from ._battinfo import declare_rig_bay, write_snapshot
 
-    from bdf.battinfo.schema import bundled_schema_dir
-
-    snapshot = cache / f"battinfo-v{version}"
-    shutil.copytree(bundled_schema_dir(), snapshot / "schemas")
-    test_doc = snapshot / "schemas" / "test.schema.json"
-    doc = json.loads(test_doc.read_text(encoding="utf-8"))
-    doc["properties"]["rig_bay"] = {"type": "string"}
-    test_doc.write_text(json.dumps(doc), encoding="utf-8")
-    (snapshot / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    write_snapshot(cache / f"battinfo-v{version}", version, declare_rig_bay)
 
 
 def _write_with_sidecar(tmp_path: Path, name: str, sidecar: dict) -> Path:

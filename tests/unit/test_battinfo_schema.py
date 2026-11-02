@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +11,8 @@ import jsonschema
 import pytest
 
 from bdf.battinfo.schema import BattinfoSchema, SchemaError, bundled_schema_dir, load_docs
+
+from ._battinfo import write_snapshot
 
 # The upstream release `src/bdf/data/battinfo/VERSION` names.
 _PINNED_VERSION = "0.8.0rc2"
@@ -35,13 +35,7 @@ def _substituted_docs(tmp_path: Path, edit: Any) -> dict[str, dict[str, Any]]:
         The mapping of file name to parsed document, read back from the
         edited copy.
     """
-    dest = tmp_path / "schemas"
-    shutil.copytree(bundled_schema_dir(), dest)
-    docs = load_docs(dest)
-    edit(docs)
-    for rel_name, doc in docs.items():
-        (dest / rel_name).write_text(json.dumps(doc), encoding="utf-8")
-    return load_docs(dest)
+    return load_docs(write_snapshot(tmp_path, edit=edit) / "schemas")
 
 
 class TestBundledSet:

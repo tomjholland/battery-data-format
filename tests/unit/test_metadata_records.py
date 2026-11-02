@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import pickle
-import shutil
 from pathlib import Path
 
 import pytest
@@ -292,18 +291,15 @@ def test_metadata_pickles() -> None:
 def test_the_json_schema_describes_each_record_by_the_loaded_schema(tmp_path: Path) -> None:
     """Each record field's JSON Schema is the loaded BattINFO root node, and
     a substituted set changes it."""
-    from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, bundled_schema_dir
+    from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema
+
+    from ._battinfo import declare_rig_bay, write_snapshot
 
     described = Metadata.model_json_schema()["properties"]["battinfo_test"]
     assert "test" in described["properties"]
     json.dumps(Metadata.model_json_schema())
 
-    substituted = tmp_path / "schemas"
-    shutil.copytree(bundled_schema_dir(), substituted)
-    test_doc = substituted / "test.schema.json"
-    doc = json.loads(test_doc.read_text(encoding="utf-8"))
-    doc["properties"]["rig_bay"] = {"type": "string"}
-    test_doc.write_text(json.dumps(doc), encoding="utf-8")
+    substituted = write_snapshot(tmp_path, edit=declare_rig_bay) / "schemas"
     try:
         BATTINFO_SCHEMA.load_dir(substituted)
         assert "rig_bay" in Metadata.model_json_schema()["properties"]["battinfo_test"]["properties"]

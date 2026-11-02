@@ -154,18 +154,14 @@ class TestWarmBattinfoVersions:
 
     def test_load_version_reads_the_warmed_release_with_no_fetch(self, monkeypatch, tmp_path) -> None:
         """A warmed release is where ``load_version`` looks, so the notebook fetches nothing."""
-        import shutil
         from unittest.mock import patch
 
-        from bdf.battinfo.schema import BattinfoSchema, bundled_schema_dir
+        from bdf.battinfo.schema import BattinfoSchema
 
-        def _snapshot(dest: Path, version: str) -> Path:
-            shutil.copytree(bundled_schema_dir(), dest / "schemas")
-            (dest / "VERSION").write_text(f"{version}\n", encoding="utf-8")
-            return dest
+        from ._battinfo import write_snapshot
 
         monkeypatch.setenv("BDF_CACHE_DIR", str(tmp_path))
-        with patch.object(BattinfoSchema, "get_snapshot", side_effect=_snapshot):
+        with patch.object(BattinfoSchema, "get_snapshot", side_effect=write_snapshot):
             assert warm_cache.warm_battinfo_versions(("0.8.0rc2",)) > 0
 
         schema = BattinfoSchema.build()
