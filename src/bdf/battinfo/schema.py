@@ -10,8 +10,8 @@ The bundled set, under ``bdf/data/battinfo/``, is a snapshot of one upstream
 BattINFO release, as the bundled ontology is a snapshot of one ontology
 release: ``schemas/`` holds the documents, and ``VERSION`` names the release.
 :meth:`BattinfoSchema.get_snapshot` fetches a release and writes it in that
-layout, to the bundle or to the cache :meth:`BattinfoSchema.load_version`
-reads. :meth:`BattinfoSchema.for_version` returns one release's set without
+layout, to the bundle or to the cache :meth:`BattinfoSchema.load_version` and
+:meth:`BattinfoSchema.load_latest` read. :meth:`BattinfoSchema.for_version` returns one release's set without
 adopting it, so a sidecar is checked against the release its writer stamped
 while :data:`BATTINFO_SCHEMA` stays as the caller left it.
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -46,6 +47,15 @@ MANAGED_SCHEMAS = (
 
 _RELEASE_URL_TMPL = "https://raw.githubusercontent.com/BIG-MAP/BattINFO/v{version}/assets/schemas/{path}"
 """The raw upstream URL of one schema document at one release tag."""
+
+_TAGS_URL = "https://api.github.com/repos/BIG-MAP/BattINFO/tags?per_page=100"
+"""The upstream API URL that lists the tags a latest release is chosen from."""
+
+_RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?")
+"""A release tag: ``v``, a three-part version, and an optional pre-release suffix."""
+
+_PRE_RELEASE_RANK = {"a": 0, "b": 1, "rc": 2, None: 3}
+"""How a pre-release suffix orders against the others and against the final release."""
 
 FETCH_ENV = "BDF_BATTINFO_FETCH"
 """Environment variable that turns off fetching a release a sidecar names, when set to ``0``, ``false``, ``no``, or ``off``."""
@@ -334,6 +344,16 @@ class BattinfoSchema:
         self._roots = {}
 
     @classmethod
+    def build(cls) -> "BattinfoSchema":
+        """Load the bundled snapshot, with no network access, and return a new set.
+
+        Returns:
+            The bundled set, named by the release ``src/bdf/data/battinfo/VERSION``
+            holds.
+        """
+        return cls.from_snapshot(bundled_snapshot_dir())
+
+    @classmethod
     def from_snapshot(cls, path: Path | str) -> "BattinfoSchema":
         """Load a snapshot directory: the documents under ``schemas/``, and the release ``VERSION`` names.
 
@@ -351,7 +371,7 @@ class BattinfoSchema:
         return cls(load_docs(root / "schemas"), version=_snapshot_version(root))
 
     @classmethod
-    def get_snapshot(cls, version: str, dest: Path | str | None = None, *, timeout: float = 30.0) -> Path:
+    def get_snapshot(cls, dest: Path | str | None = None, version: str | None = None, *, timeout: float = 30.0) -> Path:
         """Fetch one upstream BattINFO release and write it as a snapshot.
 
         Each document is written with sorted keys and a two-space indent, the
@@ -361,10 +381,11 @@ class BattinfoSchema:
         fetch leaves the destination as it was.
 
         Args:
-            version: The release to fetch, e.g. ``"0.8.0rc2"``. A leading
-                ``v``, as the upstream tag carries, is accepted.
             dest: The snapshot directory to write. Defaults to the bundled
                 package-data directory.
+            version: The release to fetch, e.g. ``"0.8.0rc2"``. A leading
+                ``v``, as the upstream tag carries, is accepted. When None,
+                the latest release (:func:`latest_release`) is fetched.
             timeout: Seconds one document fetch may take.
 
         Returns:
@@ -373,11 +394,12 @@ class BattinfoSchema:
         Raises:
             requests.HTTPError: A fetch failed, as it does for a version
                 upstream has not released.
-            SchemaError: A fetched document does not parse.
+            SchemaError: A fetched document does not parse, or upstream lists
+                no release.
         """
         import requests
 
-        version = version.removeprefix("v")
+        version = latest_release(timeout=timeout) if version is None else version.removeprefix("v")
         dest = bundled_snapshot_dir() if dest is None else Path(dest)
         documents: dict[str, bytes] = {}
         for name in MANAGED_SCHEMAS:
@@ -438,10 +460,32 @@ class BattinfoSchema:
         version = version.removeprefix("v")
         cached = _release_cache_dir(version)
         if refresh or not (cached / "VERSION").is_file():
-            self.get_snapshot(version, dest=cached)
+            self.get_snapshot(dest=cached, version=version)
             _RELEASES.pop(version, None)
             _UNAVAILABLE.pop(version, None)
         self._adopt(self.from_snapshot(cached))
+
+    def load_latest(self, *, refresh: bool = False) -> None:
+        """Load the latest BattINFO release, using the cache or fetching it, and adopt it in place.
+
+        Without ``refresh``, the newest release in the ``BDF_CACHE_DIR`` cache
+        is adopted where there is one. Otherwise the latest upstream release
+        (:func:`latest_release`) is fetched into that cache.
+
+        Args:
+            refresh: If True, ask upstream for its latest release and fetch it,
+                ignoring the cache.
+
+        Raises:
+            requests.HTTPError: The tag listing or a fetch failed.
+            SchemaError: Upstream lists no release, or a document does not parse.
+        """
+        if not refresh:
+            cached = _latest_cached_release()
+            if cached is not None:
+                self._adopt(self.from_snapshot(cached))
+                return
+        self.load_version(latest_release(), refresh=True)
 
     @classmethod
     def for_version(cls, version: str, *, fetch: bool = True, timeout: float = 30.0) -> "BattinfoSchema":
@@ -484,7 +528,7 @@ class BattinfoSchema:
                 if not fetch:
                     raise SchemaError(f"BattINFO release {version} is not cached, and fetching it is off")
                 try:
-                    cls.get_snapshot(version, dest=snapshot, timeout=timeout)
+                    cls.get_snapshot(dest=snapshot, version=version, timeout=timeout)
                 # Whatever stops the fetch (no network, a socket a sandbox
                 # blocks, a release upstream never published, a document
                 # that does not parse), the release cannot be loaded.
@@ -516,6 +560,69 @@ def _release_cache_dir(version: str) -> Path:
     from bdf.fetch import cache_dir
 
     return cache_dir() / f"battinfo-v{version}"
+
+
+def _release_key(version: str) -> tuple[int, int, int, int, int] | None:
+    """Return the sort key of one release, or ``None`` where it is not one.
+
+    Args:
+        version: The release, with a leading ``v``, e.g. ``"v0.8.0rc2"``.
+
+    Returns:
+        A key that orders a pre-release before its final release, or
+        ``None`` where ``version`` is not a release tag.
+    """
+    match = _RELEASE_TAG.fullmatch(version)
+    if match is None:
+        return None
+    major, minor, patch, pre, pre_number = match.groups()
+    return (int(major), int(minor), int(patch), _PRE_RELEASE_RANK[pre], int(pre_number or 0))
+
+
+def latest_release(timeout: float = 30.0) -> str:
+    """Ask upstream for its latest BattINFO release.
+
+    The latest release is the newest ``v``-prefixed release tag, a
+    pre-release included, because a pre-release is the release a snapshot
+    pins until its final release is tagged.
+
+    Args:
+        timeout: Seconds the tag listing may take.
+
+    Returns:
+        The release, with no leading ``v``, e.g. ``"0.8.0rc2"``.
+
+    Raises:
+        requests.HTTPError: The tag listing failed.
+        SchemaError: Upstream lists no release tag.
+    """
+    import requests
+
+    response = requests.get(_TAGS_URL, timeout=timeout, headers={"Accept": "application/vnd.github+json"})
+    response.raise_for_status()
+    tags = [tag.get("name") for tag in response.json() if isinstance(tag, dict)]
+    releases = [tag for tag in tags if isinstance(tag, str) and _release_key(tag) is not None]
+    if not releases:
+        raise SchemaError(f"BattINFO lists no release tag at {_TAGS_URL}")
+    return max(releases, key=lambda tag: _release_key(tag) or ()).removeprefix("v")
+
+
+def _latest_cached_release() -> Path | None:
+    """Return the snapshot directory of the newest release in the cache, or ``None``.
+
+    Returns:
+        The cached snapshot whose ``VERSION`` names the newest release, or
+        ``None`` where the cache holds no release.
+    """
+    from bdf.fetch import cache_dir
+
+    cached: list[tuple[tuple[int, int, int, int, int], Path]] = []
+    for path in cache_dir().glob("battinfo-v*"):
+        version = _snapshot_version(path)
+        key = _release_key(f"v{version}") if version else None
+        if key is not None:
+            cached.append((key, path))
+    return max(cached)[1] if cached else None
 
 
 def _snapshot_version(path: Path) -> str | None:
@@ -561,28 +668,20 @@ def bundled_schema_dir() -> Path:
     return bundled_snapshot_dir() / "schemas"
 
 
-def load_bundled() -> BattinfoSchema:
-    """Load the bundled BattINFO schema set, with no network access.
-
-    Returns:
-        The bundled set, named by the release ``src/bdf/data/battinfo/VERSION``
-        holds.
-    """
-    return BattinfoSchema.from_snapshot(bundled_snapshot_dir())
-
-
 def _update_snapshot_cli() -> None:
     """Entry point: fetch a BattINFO release and update the bundled snapshot.
 
-    Usage: bdf-update-battinfo VERSION
+    Usage: bdf-update-battinfo [VERSION]
+
+    With VERSION (e.g. '0.8.0'), fetches that release. Without, fetches the
+    latest release upstream lists.
     """
     import sys
 
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: bdf-update-battinfo VERSION (an upstream BattINFO release, e.g. 0.8.0)")
-    path = BattinfoSchema.get_snapshot(sys.argv[1])
-    print(f"BattINFO snapshot updated: {path} (release {sys.argv[1].removeprefix('v')})")
+    version = sys.argv[1] if len(sys.argv) > 1 else None
+    path = BattinfoSchema.get_snapshot(version=version)
+    print(f"BattINFO snapshot updated: {path} (release {_snapshot_version(path)})")
 
 
-BATTINFO_SCHEMA: BattinfoSchema = load_bundled()
+BATTINFO_SCHEMA: BattinfoSchema = BattinfoSchema.build()
 """The loaded schema set every record is bounded by, unless a caller substitutes another."""

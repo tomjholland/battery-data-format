@@ -292,7 +292,7 @@ def test_metadata_pickles() -> None:
 def test_the_json_schema_describes_each_record_by_the_loaded_schema(tmp_path: Path) -> None:
     """Each record field's JSON Schema is the loaded BattINFO root node, and
     a substituted set changes it."""
-    from bdf.battinfo.schema import BATTINFO_SCHEMA, bundled_schema_dir, load_bundled
+    from bdf.battinfo.schema import BATTINFO_SCHEMA, BattinfoSchema, bundled_schema_dir
 
     described = Metadata.model_json_schema()["properties"]["battinfo_test"]
     assert "test" in described["properties"]
@@ -308,5 +308,5 @@ def test_the_json_schema_describes_each_record_by_the_loaded_schema(tmp_path: Pa
         BATTINFO_SCHEMA.load_dir(substituted)
         assert "rig_bay" in Metadata.model_json_schema()["properties"]["battinfo_test"]["properties"]
     finally:
-        BATTINFO_SCHEMA._adopt(load_bundled())
+        BATTINFO_SCHEMA._adopt(BattinfoSchema.build())
     assert "rig_bay" not in Metadata.model_json_schema()["properties"]["battinfo_test"]["properties"]

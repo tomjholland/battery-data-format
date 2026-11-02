@@ -2,8 +2,10 @@
 
 :data:`BATTINFO_SCHEMA` holds the schema set a record is bounded by, loaded
 from the bundled snapshot of one upstream release, and adopts another set in
-place, as ``COLUMN_ONTOLOGY`` does: an upstream release
-(``BATTINFO_SCHEMA.load_version``) or a directory (``load_dir``).
+place, as ``COLUMN_ONTOLOGY`` does: the latest upstream release
+(``BATTINFO_SCHEMA.load_latest``), a named one (``load_version``), or a
+directory (``load_dir``). ``BattinfoSchema.build()`` returns a fresh copy of
+the bundled set.
 :class:`Record` gives attribute access over one node of it.
 :class:`SchemaError` names a value the loaded set refuses.
 """

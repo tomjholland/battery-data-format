@@ -12,7 +12,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from bdf.battinfo.schema import BattinfoSchema, SchemaError, bundled_schema_dir, load_bundled, load_docs
+from bdf.battinfo.schema import BattinfoSchema, SchemaError, bundled_schema_dir, load_docs
 
 # The upstream release `src/bdf/data/battinfo/VERSION` names.
 _PINNED_VERSION = "0.8.0rc2"
@@ -50,7 +50,7 @@ class TestBundledSet:
 
         With no network access, an install still builds a loaded set.
         """
-        schema = load_bundled()
+        schema = BattinfoSchema.build()
         assert isinstance(schema, BattinfoSchema)
 
     def test_import_loads_bundled_set(self) -> None:
@@ -58,7 +58,7 @@ class TestBundledSet:
 
         The loaded set reports the release the bundled ``VERSION`` names.
         """
-        schema = load_bundled()
+        schema = BattinfoSchema.build()
         assert schema.version == _PINNED_VERSION
 
 
@@ -278,7 +278,7 @@ def test_a_root_is_resolved_once_and_adopting_a_set_clears_it(tmp_path: Path) ->
     def declare_rig_bay(docs: dict[str, dict[str, Any]]) -> None:
         docs["test.schema.json"]["properties"]["rig_bay"] = {"type": "string"}
 
-    schema = load_bundled()
+    schema = BattinfoSchema.build()
     root = schema.root("test.schema.json")
     assert schema.root("test.schema.json") is root
     assert "rig_bay" not in root[0]["properties"]

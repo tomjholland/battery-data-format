@@ -23,7 +23,7 @@ from bdf.battinfo.schema import (
     _update_snapshot_cli,
     bundled_schema_dir,
     bundled_snapshot_dir,
-    load_bundled,
+    latest_release,
     load_docs,
 )
 from bdf.metadata import Metadata
@@ -91,7 +91,7 @@ def test_the_bundle_holds_every_managed_document_and_names_its_release() -> None
     ``VERSION`` names the release the loaded set reports."""
     assert set(load_docs(bundled_schema_dir())) == set(MANAGED_SCHEMAS)
     version = (bundled_snapshot_dir() / "VERSION").read_text(encoding="utf-8").strip()
-    assert version and load_bundled().version == version
+    assert version and BattinfoSchema.build().version == version
 
 
 def test_get_snapshot_fetches_each_document_at_the_release_tag(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_get_snapshot_fetches_each_document_at_the_release_tag(tmp_path: Path) -
     the release in ``VERSION``. A leading ``v`` names the same release."""
     get = _upstream()
     with patch("requests.get", get):
-        dest = BattinfoSchema.get_snapshot("v0.8.0", tmp_path / "snapshot")
+        dest = BattinfoSchema.get_snapshot(tmp_path / "snapshot", "v0.8.0")
 
     urls = [call.args[0] for call in get.call_args_list]
     assert len(urls) == len(MANAGED_SCHEMAS)
@@ -117,11 +117,11 @@ def test_a_failed_fetch_leaves_the_snapshot_as_it_was(tmp_path: Path) -> None:
     """A version upstream has not released answers 404, and the earlier
     snapshot survives untouched."""
     with patch("requests.get", _upstream()):
-        dest = BattinfoSchema.get_snapshot("0.8.0", tmp_path / "snapshot")
+        dest = BattinfoSchema.get_snapshot(tmp_path / "snapshot", "0.8.0")
     before = {path: path.read_bytes() for path in dest.rglob("*") if path.is_file()}
 
     with patch("requests.get", _upstream(fail_on="dataset.schema.json")), pytest.raises(requests.HTTPError):
-        BattinfoSchema.get_snapshot("9.9.9", dest)
+        BattinfoSchema.get_snapshot(dest, "9.9.9")
 
     assert {path: path.read_bytes() for path in dest.rglob("*") if path.is_file()} == before
     assert [path.name for path in tmp_path.iterdir()] == ["snapshot"]
@@ -131,7 +131,7 @@ def test_a_document_that_does_not_parse_is_refused(tmp_path: Path) -> None:
     """Fetched content that is not JSON raises ``SchemaError`` naming the document."""
     response = Mock(content=b"not valid json", raise_for_status=Mock())
     with patch("requests.get", return_value=response), pytest.raises(SchemaError, match="test.schema.json"):
-        BattinfoSchema.get_snapshot("0.8.0", tmp_path / "snapshot")
+        BattinfoSchema.get_snapshot(tmp_path / "snapshot", "0.8.0")
 
 
 def test_load_version_caches_the_release_and_refresh_refetches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +139,7 @@ def test_load_version_caches_the_release_and_refresh_refetches(tmp_path: Path, m
     adopts it in place; a second load reads the cache, and ``refresh`` fetches
     again."""
     monkeypatch.setenv("BDF_CACHE_DIR", str(tmp_path))
-    schema = load_bundled()
+    schema = BattinfoSchema.build()
 
     with patch("requests.get", _upstream()) as first:
         schema.load_version("0.8.0")
@@ -149,9 +149,9 @@ def test_load_version_caches_the_release_and_refresh_refetches(tmp_path: Path, m
     assert (tmp_path / "battinfo-v0.8.0" / "VERSION").is_file()
 
     with patch("requests.get", _upstream()) as second:
-        load_bundled().load_version("v0.8.0")
+        BattinfoSchema.build().load_version("v0.8.0")
         second.assert_not_called()
-        load_bundled().load_version("0.8.0", refresh=True)
+        BattinfoSchema.build().load_version("0.8.0", refresh=True)
     assert second.call_count == len(MANAGED_SCHEMAS)
 
 
@@ -168,7 +168,7 @@ def no_releases_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_for_version_serves_the_bundled_release_with_no_network(no_releases_loaded: Path) -> None:
     """The bundled release loads from the bundle, with fetching off."""
-    bundled = load_bundled().version
+    bundled = BattinfoSchema.build().version
     assert bundled is not None
     with patch("requests.get") as get:
         schema = BattinfoSchema.for_version(f"v{bundled}", fetch=False)
@@ -211,19 +211,85 @@ def test_for_version_remembers_a_failed_fetch(no_releases_loaded: Path) -> None:
     assert get.call_count == calls
 
     with patch("requests.get", _upstream()):
-        load_bundled().load_version("0.8.0", refresh=True)
+        BattinfoSchema.build().load_version("0.8.0", refresh=True)
         assert BattinfoSchema.for_version("0.8.0").version == "0.8.0"
 
 
-def test_update_cli_writes_the_bundle_for_the_named_release() -> None:
+def test_update_cli_writes_the_bundle_for_the_named_or_latest_release(tmp_path: Path) -> None:
     """``bdf-update-battinfo VERSION`` writes the bundled snapshot for that
-    release, and needs the release named."""
-    with patch("sys.argv", ["bdf-update-battinfo", "0.8.0"]), patch.object(BattinfoSchema, "get_snapshot") as snapshot:
+    release, and ``bdf-update-battinfo`` alone for the latest release, as
+    ``bdf-update-snapshot`` does for the ontology."""
+    with (
+        patch("sys.argv", ["bdf-update-battinfo", "0.8.0"]),
+        patch.object(BattinfoSchema, "get_snapshot", return_value=tmp_path) as snapshot,
+    ):
         _update_snapshot_cli()
-    snapshot.assert_called_once_with("0.8.0")
+    snapshot.assert_called_once_with(version="0.8.0")
 
-    with patch("sys.argv", ["bdf-update-battinfo"]), pytest.raises(SystemExit, match="VERSION"):
+    with (
+        patch("sys.argv", ["bdf-update-battinfo"]),
+        patch.object(BattinfoSchema, "get_snapshot", return_value=tmp_path) as snapshot,
+    ):
         _update_snapshot_cli()
+    snapshot.assert_called_once_with(version=None)
+
+
+def _tags(*names: str) -> Mock:
+    """Mock ``requests.get`` for the upstream tag listing, answering ``names``."""
+    response = Mock(raise_for_status=Mock())
+    response.json = Mock(return_value=[{"name": name} for name in names])
+    return Mock(return_value=response)
+
+
+def test_the_latest_release_is_the_newest_release_tag() -> None:
+    """A final release orders after its pre-releases, a pre-release counts, and
+    a tag that is not a ``v``-prefixed release is ignored."""
+    with patch("requests.get", _tags("v0.6.0", "v0.8.0rc2", "0.9.0", "test", "v0.8.0rc10")):
+        assert latest_release() == "0.8.0rc10"
+    with patch("requests.get", _tags("v0.8.0rc2", "v0.8.0", "v0.8.0b1")):
+        assert latest_release() == "0.8.0"
+    with patch("requests.get", _tags("test", "0.5.0")), pytest.raises(SchemaError, match="no release tag"):
+        latest_release()
+
+
+def test_get_snapshot_without_a_version_fetches_the_latest_release(tmp_path: Path) -> None:
+    """With no version named, the snapshot is of the latest release, and ``VERSION`` names it."""
+    with (
+        patch("bdf.battinfo.schema.latest_release", return_value="0.8.0") as latest,
+        patch("requests.get", _upstream()),
+    ):
+        dest = BattinfoSchema.get_snapshot(tmp_path / "snapshot")
+    latest.assert_called_once()
+    assert (dest / "VERSION").read_text(encoding="utf-8").strip() == "0.8.0"
+
+
+def test_load_latest_reads_the_newest_cached_release_and_refresh_asks_upstream(
+    no_releases_loaded: Path,
+) -> None:
+    """``load_latest`` adopts the newest cached release with no network access,
+    fetches the latest release when nothing is cached, and with ``refresh``
+    asks upstream even when something is."""
+    schema = BattinfoSchema.build()
+    with patch("bdf.battinfo.schema.latest_release", return_value="0.8.0rc2"), patch("requests.get", _upstream()):
+        schema.load_latest()
+    assert schema.version == "0.8.0rc2"
+
+    with patch("requests.get", _upstream()):
+        BattinfoSchema.build().load_version("0.8.0")
+    with patch("requests.get") as get:
+        latest = BattinfoSchema.build()
+        latest.load_latest()
+    get.assert_not_called()
+    assert latest.version == "0.8.0"
+
+    with (
+        patch("bdf.battinfo.schema.latest_release", return_value="0.9.0") as asked,
+        patch("requests.get", _upstream()) as fetched,
+    ):
+        latest.load_latest(refresh=True)
+    asked.assert_called_once()
+    assert fetched.call_count == len(MANAGED_SCHEMAS)
+    assert latest.version == "0.9.0"
 
 
 @pytest.mark.network
@@ -232,9 +298,9 @@ def test_update_cli_writes_the_bundle_for_the_named_release() -> None:
 def test_bundled_snapshot_matches_its_declared_release(tmp_path: Path) -> None:
     """The bundle never lies about its release: fetching the release
     ``VERSION`` names reproduces every bundled file byte for byte."""
-    version = load_bundled().version
+    version = BattinfoSchema.build().version
     assert version is not None
-    fresh = BattinfoSchema.get_snapshot(version, tmp_path / "fresh")
+    fresh = BattinfoSchema.get_snapshot(tmp_path / "fresh", version)
 
     bundled = bundled_snapshot_dir()
     for name in ("VERSION", *(f"schemas/{doc}" for doc in MANAGED_SCHEMAS)):
