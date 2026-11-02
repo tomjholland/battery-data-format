@@ -63,6 +63,16 @@ tests, which load from that cache with no network call.
 """
 
 
+PINNED_BATTINFO_VERSIONS: tuple[str, ...] = ("0.8.0rc2",)
+"""BattINFO releases an example notebook pins via ``BattinfoSchema.load_version``.
+
+Like the ontology releases above, the version is interpolated into a release
+URL at call time, so no notebook URL names it. ``scripts/warm_cache.py``
+fetches each release into the ``BDF_CACHE_DIR`` release cache ahead of the
+network-marked notebook tests, which load it from there with no network call.
+"""
+
+
 NON_DATA_URLS: frozenset[str] = frozenset(
     {
         # Metadata example: dataset DOI and landing page (not fetched).

@@ -27,7 +27,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from docs.examples.remote_sources import PINNED_ONTOLOGY_VERSIONS, REMOTE_DATA_SOURCES  # noqa: E402
+from docs.examples.remote_sources import (  # noqa: E402
+    PINNED_BATTINFO_VERSIONS,
+    PINNED_ONTOLOGY_VERSIONS,
+    REMOTE_DATA_SOURCES,
+)
 from scripts import warm_cache  # noqa: E402
 from scripts.warm_cache import emit_key, url_sources, warm  # noqa: E402
 from tests.integration.test_cases import ALL_CASES  # noqa: E402
@@ -76,7 +80,11 @@ class TestEmitKey:
 
     def test_matches_manual_sha256_of_joined_urls(self) -> None:
         urls = url_sources()
-        joined = "\n".join(urls + [f"ontology-version:{v}" for v in PINNED_ONTOLOGY_VERSIONS])
+        joined = "\n".join(
+            urls
+            + [f"ontology-version:{v}" for v in PINNED_ONTOLOGY_VERSIONS]
+            + [f"battinfo-version:{v}" for v in PINNED_BATTINFO_VERSIONS]
+        )
         expected = hashlib.sha256(joined.encode("utf-8")).hexdigest()
         assert emit_key(urls) == expected
 
@@ -139,3 +147,29 @@ class TestWarmSizeGuard:
         self._fake_fetch(monkeypatch, tmp_path, size_per_file=200)
         with pytest.raises(SystemExit):
             warm(["https://example.com/big.csv"], max_bytes=100)
+
+
+class TestWarmBattinfoVersions:
+    """Tests for warming the pinned BattINFO releases."""
+
+    def test_load_version_reads_the_warmed_release_with_no_fetch(self, monkeypatch, tmp_path) -> None:
+        """A warmed release is where ``load_version`` looks, so the notebook fetches nothing."""
+        import shutil
+        from unittest.mock import patch
+
+        from bdf.battinfo.schema import BattinfoSchema, bundled_schema_dir
+
+        def _snapshot(dest: Path, version: str) -> Path:
+            shutil.copytree(bundled_schema_dir(), dest / "schemas")
+            (dest / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+            return dest
+
+        monkeypatch.setenv("BDF_CACHE_DIR", str(tmp_path))
+        with patch.object(BattinfoSchema, "get_snapshot", side_effect=_snapshot):
+            assert warm_cache.warm_battinfo_versions(("0.8.0rc2",)) > 0
+
+        schema = BattinfoSchema.build()
+        with patch("requests.get") as get:
+            schema.load_version("0.8.0rc2")
+        get.assert_not_called()
+        assert schema.version == "0.8.0rc2"

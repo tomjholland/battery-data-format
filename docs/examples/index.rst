@@ -12,6 +12,7 @@ to start if you want end-to-end workflows.
    validate
    repair
    ontology_spec_and_units
+   battinfo_schema
    visualization
    ingest
    registry
