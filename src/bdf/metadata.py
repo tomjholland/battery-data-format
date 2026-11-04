@@ -44,9 +44,22 @@ class _RecordModel(BaseModel):
 
 
 class BdfReadInfo(_RecordModel):
-    """BDF-owned read audit facts, kept out of the BattINFO records."""
+    """BDF-owned read audit facts, kept out of the BattINFO records.
+
+    The fields fall in three groups. The origin fields (``source``,
+    ``created_with``, ``time_reconciliation``) say where the data came
+    from: a read from a source that is not a sidecar sets them, and every
+    later read and save passes them through unchanged. The writer stamps
+    (``bdf_version``, ``ontology_version``) describe the sidecar file, so
+    ``save()`` replaces them. ``battinfo_version`` names the release the
+    entities were checked against.
+    """
 
     source: str | None = None
+    """The plugin that read the data, or ``"custom"``."""
+    created_with: str | None = None
+    """The batterydf version that first read the data from its source. Empty
+    for a sidecar that an older bdf wrote."""
     time_reconciliation: list[dict] | None = None
     bdf_version: str | None = None
     """The batterydf package version that wrote this sidecar. Stamped by
@@ -56,8 +69,8 @@ class BdfReadInfo(_RecordModel):
     ontology_version: str | None = None
     """The BDF ontology release the writer's column spec was pinned to."""
     battinfo_ref: str | None = None
-    """The upstream BattINFO commit the writer's bundled schemas were fetched
-    at. bdf 0.2.0 stamped it; a later save states ``battinfo_version`` instead."""
+    """Deprecated. The upstream BattINFO commit that bdf 0.2.0 stamped. It
+    still reads, and a save drops it and states ``battinfo_version`` instead."""
     battinfo_version: str | None = None
     """The BattINFO release the entities follow. ``save()`` stamps the release
     it checked them against; set it to move the metadata to another release."""

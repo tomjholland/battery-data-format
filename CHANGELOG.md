@@ -25,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `bdf-update-battinfo VERSION` replaces `scripts/update_battinfo.py`. It needs a version, because BattINFO publishes no final release.
 
 ### Added
+- `bdf.created_with` names the batterydf version that first read the data from its source. A read from a source that is not a sidecar sets it and `bdf.source`; every later read and save passes `source`, `created_with` and `time_reconciliation` through unchanged. Metadata built by hand states `created_with` when saved. A sidecar that bdf 0.2.0rc3 wrote keeps its `source` and states no `created_with`.
+- `bdf.battinfo_ref` is deprecated. A 0.2.0rc3 or 0.2.0 sidecar that states it still reads, and a save drops it.
 - A sidecar is checked against the BattINFO release it states (`bdf.battinfo_version`), fetched once in each process when needed with a 5 s deadline. A bdf 0.2.0 sidecar is checked against `0.8.0rc2` by its `battinfo_ref`. `battinfo=` on `read`, `scan`, `save` and `ingest` names the release instead. A release that cannot be loaded or used falls back to the bundled release with a `BDFDefinitionWarning`, as the ontology does (#130).
 - `BDFDefinitionError` and `BDFDefinitionWarning`, exported from `bdf`.
 - `ontology=` on `ingest` and `Dataset.to_schemaorg_dataset`. `ingest` passes it to each read, save, and validation.

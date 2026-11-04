@@ -884,9 +884,9 @@ def test_metadata_roundtrips_through_save_and_read(tmp_path: Path) -> None:
     p = tmp_path / "data.bdf.csv"
     io.save(df, p, metadata=original)
     _, restored = io.read(p)
-    # bdf.source is the plugin id this read resolved, assigned unconditionally,
-    # so it cannot round-trip against an instance that never set it.
-    assert restored.bdf.source is not None
+    # Hand-built metadata states the writer in created_with and no source.
+    assert restored.bdf.created_with is not None
+    assert restored.bdf.source is None
     restored_without_bdf = restored.model_copy(update={"bdf": original.bdf})
     assert restored_without_bdf == original
 
@@ -1800,37 +1800,39 @@ def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_
 # Sidecar origin: where the data came from, and the 0.2.0rc3 sidecar
 # ---------------------------------------------------------------------------
 
-origin_not_implemented = pytest.mark.xfail(strict=True, reason="sidecar origin not implemented")
 
-
-@origin_not_implemented
 def test_a_vendor_file_keeps_its_origin_through_save_and_read(tmp_path: Path) -> None:
     data, plugin = _json_plugin_with_start_and_instrument(tmp_path, {"start": 1700000000, "instrument": "BaSyTec CTS"})
 
+    # Read the vendor file, save it as a bdf file, and read that file back.
     _, first = read(data, plugin=plugin)
     io.save(_FRAME, tmp_path / "out.bdf.csv", metadata=first)
     _, again = read(tmp_path / "out.bdf.csv")
 
     import bdf
 
+    # The first read records which bdf converted the vendor file.
     assert first.bdf.created_with == bdf.__version__
+    # The second read is of a bdf file, but the metadata still gives the first read's source and
+    # the converting bdf, not "bdf_csv" and nothing: the origin is not lost on the way.
     assert (again.bdf.source, again.bdf.created_with) == (first.bdf.source, first.bdf.created_with)
 
 
-@origin_not_implemented
 def test_metadata_built_by_hand_states_the_writer_and_no_source(tmp_path: Path) -> None:
+    # Metadata made in code, not read from any file.
     p = tmp_path / "data.bdf.csv"
     io.save(_FRAME, p, metadata=_meta({"test": {"name": "cell-1"}}))
 
     import bdf
 
+    # The save fills created_with with the bdf that wrote it, and states no source, as there was none.
     stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
     assert stated["created_with"] == bdf.__version__
     assert "source" not in stated
 
 
-@origin_not_implemented
 def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again_unchanged(tmp_path: Path, data_dir: Path) -> None:
+    # A real sidecar written by bdf 0.2.0rc3, copied so the test does not change the fixture.
     folder = tmp_path / "old"
     shutil.copytree(data_dir / "sidecars" / "0.2.0rc3", folder)
 
@@ -1838,16 +1840,18 @@ def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again_unchanged(tmp_path: Path
     io.save(_FRAME, tmp_path / "new.bdf.csv", metadata=first)
     _, again = read(tmp_path / "new.bdf.csv")
 
+    # The old file reads with its values as written. It has no created_with, and nothing invents one.
     assert first.battinfo_test == {"test": {"instrument_name": "BaSyTec CTS", "name": "cell-1 formation"}}
     assert first.extras == {"rig_bay": "B3"}
     assert (first.bdf.source, first.bdf.created_with) == ("bdf_csv", None)
+    # A save and a second read change none of it...
     for name in ("battinfo_test", "extras"):
         assert getattr(again, name) == getattr(first, name)
     assert (again.bdf.source, again.bdf.created_with) == ("bdf_csv", None)
+    # ...except that the new sidecar no longer writes the old battinfo_ref field.
     assert "battinfo_ref" not in json.loads((tmp_path / "new.bdf.metadata.json").read_text())["bdf"]
 
 
-@origin_not_implemented
 def test_a_save_drops_battinfo_ref_and_replaces_a_stale_ontology_version(tmp_path: Path) -> None:
     p = tmp_path / "data.bdf.csv"
     meta = _meta({"test": {"name": "cell-1"}}, battinfo_ref="eda462993ae43a64706e326253dddb44be100923")
@@ -1857,4 +1861,4 @@ def test_a_save_drops_battinfo_ref_and_replaces_a_stale_ontology_version(tmp_pat
 
     stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
     assert "battinfo_ref" not in stated
-    assert stated["ontology_version"] == COLUMN_ONTOLOGY.version
+    assert stated["ontology_version"] == COLUMN_ONTOLOGY.ontology_version

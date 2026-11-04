@@ -25,6 +25,7 @@ def _assemble_metadata(
     path: str | Path,
     resolved_plugin: Plugin,
     *,
+    source: str,
     tz: str,
     day_month_order: DayMonthOrder | None = None,
     validate: bool = True,
@@ -37,6 +38,8 @@ def _assemble_metadata(
         path: Local file path or URL being read.
         resolved_plugin: The plugin whose ``metadata_parser`` runs when no
             reserved sidecar sits beside ``path``.
+        source: Origin recorded as ``bdf.source`` for metadata that the plugin
+            parser made; a sidecar keeps the source it states.
         tz: IANA timezone forwarded to the plugin's metadata parser.
         day_month_order: Field order forwarded to the plugin's metadata parser.
         validate: Raise for a BattINFO value that the checked release refuses;
@@ -48,8 +51,8 @@ def _assemble_metadata(
     Returns:
         The reserved sidecar's ``Metadata`` where ``<stem>.metadata.json``
         exists beside ``path``, restored repair records included; the
-        plugin parser's ``Metadata`` otherwise. The caller still assigns
-        ``bdf.source`` and applies this read's own repairs.
+        plugin parser's ``Metadata`` otherwise, with ``bdf.source`` and
+        ``bdf.created_with`` set. The caller still applies this read's own repairs.
 
     Raises:
         BDFMetadataError: A sidecar exists and cannot be restored. An empty
@@ -60,6 +63,8 @@ def _assemble_metadata(
         BDFMetadataError: With ``validate``, the checked BattINFO release
             refuses a value.
     """
+    import bdf
+
     reserved = BdfSidecarParser()
     if reserved.matches(path):
         metadata = reserved.parse(path)
@@ -71,6 +76,8 @@ def _assemble_metadata(
         metadata = resolved_plugin.metadata_parser.parse(
             path, tz=tz, day_month_order=day_month_order, preamble_lines=preamble_lines
         )
+        metadata.bdf.source = source
+        metadata.bdf.created_with = bdf.__version__
 
     lines, schema = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel)
     if schema is not None:
@@ -188,6 +195,7 @@ def _read(
     metadata = _assemble_metadata(
         path,
         resolved_plugin,
+        source=plugin_id or "custom",
         tz=tz,
         day_month_order=day_month_order,
         validate=validate,
@@ -216,8 +224,6 @@ def _read(
         bdf_df, repairs = _reconcile_time_scale(bdf_df, reconcile_time=reconcile_time, strict=validate, ontology=used)
         if repairs:
             metadata.bdf.time_reconciliation = repairs
-
-    metadata.bdf.source = plugin_id or "custom"
 
     return bdf_df, metadata, used
 
@@ -589,6 +595,9 @@ def _version_stamps(ontology_version: str | None, schema: BattinfoSchema | None)
     }
 
 
+_WRITER_STAMPS = ("bdf_version", "ontology_version", "battinfo_version", "battinfo_ref")
+
+
 def _sidecar_text(metadata: Metadata, ontology_version: str | None, schema: BattinfoSchema | None) -> str | None:
     """Return the sidecar text for ``metadata``, or None where it carries nothing.
 
@@ -611,12 +620,16 @@ def _sidecar_text(metadata: Metadata, ontology_version: str | None, schema: Batt
     Raises:
         ValueError: A value that JSON cannot hold, such as a ``numpy.int64``.
     """
+    import bdf
+
     payload = metadata.model_dump(mode="json", exclude_defaults=True)
     if not payload:
         return None
     stamps = payload.setdefault("bdf", {})
-    stamps.pop("battinfo_ref", None)
-    stamps.pop("battinfo_version", None)
+    for key in _WRITER_STAMPS:
+        stamps.pop(key, None)
+    if "source" not in stamps and "created_with" not in stamps:
+        stamps["created_with"] = bdf.__version__
     stamps.update({k: v for k, v in _version_stamps(ontology_version, schema).items() if v})
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
