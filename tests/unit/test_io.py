@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1618,13 +1619,13 @@ def test_a_save_stamps_the_release_that_a_0_2_0_sidecars_ref_names(
     assert "battinfo_ref" not in json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
 
 
-def _plugin_staging_refused_values(tmp_path: Path) -> tuple[Path, Plugin]:
-    """Return a file, and a plugin that stages a started_at text and an instrument_name number from its JSON."""
+def _json_plugin_with_start_and_instrument(tmp_path: Path, content: dict) -> tuple[Path, Plugin]:
+    """Return a file, and a plugin that stages ``start`` as started_at and ``instrument`` as instrument_name from its JSON ``content``."""
     from bdf.metadata_targets import METADATA
 
     data = tmp_path / "cell.csv"
     data.write_text("Test Time / s,Voltage / V,Current / A\n0,3.7,0.1\n")
-    (tmp_path / "cell.json").write_text(json.dumps({"start": "yesterday", "instrument": 400}))
+    (tmp_path / "cell.json").write_text(json.dumps(content))
     rules = {
         METADATA.battinfo_test.test.started_at: JsonRule(candidates=(("start",),)),
         METADATA.battinfo_test.test.instrument_name: JsonRule(candidates=(("instrument",),)),
@@ -1637,7 +1638,7 @@ def _plugin_staging_refused_values(tmp_path: Path) -> tuple[Path, Plugin]:
 
 @not_implemented
 def test_a_plugin_read_of_a_refused_value_follows_validate(tmp_path: Path) -> None:
-    data, plugin = _plugin_staging_refused_values(tmp_path)
+    data, plugin = _json_plugin_with_start_and_instrument(tmp_path, {"start": "yesterday", "instrument": 400})
 
     with pytest.raises(BDFMetadataError) as info:
         read(data, plugin=plugin)
@@ -1782,3 +1783,67 @@ def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_
     meta, caught = _read_recording(p)
 
     _assert_fell_back(meta, caught, "0.7.0", bundled)
+
+
+# ---------------------------------------------------------------------------
+# Sidecar origin: where the data came from, and the 0.2.0rc3 sidecar
+# ---------------------------------------------------------------------------
+
+origin_not_implemented = pytest.mark.xfail(strict=True, reason="sidecar origin not implemented")
+
+
+@origin_not_implemented
+def test_a_vendor_file_keeps_its_origin_through_save_and_read(tmp_path: Path) -> None:
+    data, plugin = _json_plugin_with_start_and_instrument(tmp_path, {"start": 1700000000, "instrument": "BaSyTec CTS"})
+
+    _, first = read(data, plugin=plugin)
+    io.save(_FRAME, tmp_path / "out.bdf.csv", metadata=first)
+    _, again = read(tmp_path / "out.bdf.csv")
+
+    import bdf
+
+    assert first.bdf.created_with == bdf.__version__
+    assert (again.bdf.source, again.bdf.created_with) == (first.bdf.source, first.bdf.created_with)
+
+
+@origin_not_implemented
+def test_metadata_built_by_hand_states_the_writer_and_no_source(tmp_path: Path) -> None:
+    p = tmp_path / "data.bdf.csv"
+    io.save(_FRAME, p, metadata=_meta({"test": {"name": "cell-1"}}))
+
+    import bdf
+
+    stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
+    assert stated["created_with"] == bdf.__version__
+    assert "source" not in stated
+
+
+@origin_not_implemented
+def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again_unchanged(tmp_path: Path, data_dir: Path) -> None:
+    folder = tmp_path / "old"
+    shutil.copytree(data_dir / "sidecars" / "0.2.0rc3", folder)
+
+    _, first = read(folder / "data.bdf.csv")
+    io.save(_FRAME, tmp_path / "new.bdf.csv", metadata=first)
+    _, again = read(tmp_path / "new.bdf.csv")
+
+    assert first.battinfo_test == {"test": {"instrument_name": "BaSyTec CTS", "name": "cell-1 formation"}}
+    assert first.extras == {"rig_bay": "B3"}
+    assert (first.bdf.source, first.bdf.created_with) == ("bdf_csv", None)
+    for name in ("battinfo_test", "extras"):
+        assert getattr(again, name) == getattr(first, name)
+    assert (again.bdf.source, again.bdf.created_with) == ("bdf_csv", None)
+    assert "battinfo_ref" not in json.loads((tmp_path / "new.bdf.metadata.json").read_text())["bdf"]
+
+
+@origin_not_implemented
+def test_a_save_drops_battinfo_ref_and_replaces_a_stale_ontology_version(tmp_path: Path) -> None:
+    p = tmp_path / "data.bdf.csv"
+    meta = _meta({"test": {"name": "cell-1"}}, battinfo_ref="eda462993ae43a64706e326253dddb44be100923")
+    meta.bdf.ontology_version = "0.0.1"
+
+    io.save(_FRAME, p, metadata=meta)
+
+    stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
+    assert "battinfo_ref" not in stated
+    assert stated["ontology_version"] == COLUMN_ONTOLOGY.version
