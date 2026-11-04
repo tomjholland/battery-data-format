@@ -1651,3 +1651,134 @@ def test_a_plugin_read_of_a_refused_value_follows_validate(tmp_path: Path) -> No
     assert "battinfo_test.test.started_at" in message
     assert "battinfo_test.test.instrument_name" in message
     assert meta.battinfo_test == {"test": {"started_at": "yesterday", "instrument_name": 400}}
+
+
+# ---------------------------------------------------------------------------
+# A read checks against the release that the sidecar states
+# ---------------------------------------------------------------------------
+
+release_check_not_implemented = pytest.mark.xfail(strict=True, reason="sidecar release check not implemented")
+
+
+def _sidecar_beside_data(folder: Path, entity: dict, **stated: str) -> Path:
+    """Write a data file and a sidecar whose ``battinfo_test`` is ``entity`` and whose ``bdf`` is ``stated``."""
+    folder.mkdir(exist_ok=True)
+    p = folder / "data.bdf.csv"
+    _FRAME.write_csv(p)
+    p.with_suffix(".metadata.json").write_text(json.dumps({"battinfo_test": entity, "bdf": stated}))
+    return p
+
+
+def _read_recording(p: Path, **kwargs: object) -> tuple[Metadata, list[warnings.WarningMessage]]:
+    """Read ``p`` and return its metadata with every warning the read gave."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, meta = read(p, **kwargs)  # type: ignore[arg-type]
+    return meta, caught
+
+
+def _assert_fell_back(meta: Metadata, caught: list[warnings.WarningMessage], stated: str, bundled: str) -> None:
+    """One BDFDefinitionWarning names the stated release, a reason and the bundle; the metadata states the bundle."""
+    (message,) = [str(w.message) for w in caught if w.category is BDFDefinitionWarning]
+    pattern = rf"Could not use BattINFO release {stated} .* states: .+\. Checking against the bundled release {bundled}"
+    assert re.search(pattern, message, re.DOTALL)
+    assert meta.bdf.battinfo_version == bundled
+    assert bdf.battinfo.BATTINFO_SCHEMA.version == bundled
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_sidecar_from_another_release_is_checked_against_it(tmp_path: Path) -> None:
+    cache_release(tmp_path, "0.7.0", release_docs("legacy_field"))
+    bundled = bdf.battinfo.BATTINFO_SCHEMA
+    p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
+
+    meta, caught = _read_recording(p)
+
+    assert _battinfo_warnings(caught) == []
+    assert meta.bdf.battinfo_version == "0.7.0"
+    assert bdf.battinfo.BATTINFO_SCHEMA is bundled
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_read_with_a_named_set_checks_against_it_and_loads_no_other_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_release(tmp_path, "0.8.0", release_docs("new_field"))
+    fake = _unreachable_github(monkeypatch)
+    named = BattinfoSchema.from_version("0.8.0")
+    p = _sidecar_beside_data(tmp_path, {"test": {"new_field": 1}}, battinfo_version="0.7.0")
+
+    meta, caught = _read_recording(p, battinfo=named)
+
+    assert _battinfo_warnings(caught) == []
+    assert meta.bdf.battinfo_version == "0.8.0"
+    assert fake.urls == []
+
+
+@uses_cache
+@release_check_not_implemented
+def test_many_sidecars_at_an_unreachable_release_each_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _unreachable_github(monkeypatch)
+    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+
+    for folder in ("a", "b"):
+        p = _sidecar_beside_data(tmp_path / folder, {"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
+        meta, caught = _read_recording(p)
+        _assert_fell_back(meta, caught, "0.7.0", bundled)
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _unreachable_github(monkeypatch)
+    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+    p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
+
+    meta, caught = _read_recording(p, validate=False)
+
+    _assert_fell_back(meta, caught, "0.7.0", bundled)
+    (refusal,) = [str(w.message) for w in caught if w.category is BDFMetadataWarning]
+    assert f"BattINFO {bundled} refuses battinfo_test.test:" in refusal
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_0_2_0_sidecars_ref_is_read_as_release_0_8_0rc2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cache_release(tmp_path, "0.8.0rc2", bundled_docs())
+    point_bundle_at(monkeypatch, tmp_path / "bundle", "0.9.0", release_docs("new_field"))
+    p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_ref=_0_2_0_REF)
+
+    meta, caught = _read_recording(p)
+
+    assert _battinfo_warnings(caught) == []
+    assert meta.bdf.battinfo_version == "0.8.0rc2"
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_stated_release_that_is_not_a_version_is_replaced_by_the_bundle(tmp_path: Path) -> None:
+    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+    p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_version="main")
+
+    meta, caught = _read_recording(p)
+
+    _assert_fell_back(meta, caught, "main", bundled)
+
+
+@uses_cache
+@release_check_not_implemented
+def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_path: Path) -> None:
+    doc = {"$id": "https://example.test/test.schema.json", "properties": {"test": {"$ref": "missing.schema.json"}}}
+    cache_release(tmp_path, "0.7.0", {"test.schema.json": doc})
+    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+    p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
+
+    meta, caught = _read_recording(p)
+
+    _assert_fell_back(meta, caught, "0.7.0", bundled)
