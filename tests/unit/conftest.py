@@ -31,6 +31,15 @@ class FakeGitHub:
         return answer
 
 
+def ontology_ttl(version: str) -> str:
+    """Return the smallest ontology that states ``version``."""
+    return f"""\
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+<https://w3id.org/battery-data-alliance/ontology/battery-data-format> a owl:Ontology ;
+    owl:versionInfo "{version}" .
+"""
+
+
 @pytest.fixture
 def github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     fake = FakeGitHub()

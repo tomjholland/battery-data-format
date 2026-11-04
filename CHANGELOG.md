@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Breaking
+- The bundled ontology is now a version directory, `src/bdf/data/bdf-ontology/`, holding `bdf-ontology.ttl` and a `VERSION` file, in place of `bdf-ontology-snapshot.ttl`.
+- A cached ontology release is now a `bdf-ontology-v{version}/` directory in the cache. bdf no longer reads the old `bdf-ontology-v*.ttl` cache files, so a release cached before is fetched again on its first use.
+- `ColumnOntology.load_latest()` loads upstream's latest GitHub release, not the live deployment.
+- `ColumnOntology.get_snapshot(version=None)` fetches upstream's latest GitHub release, not the live deployment.
+- `ColumnOntology.load_version()` and `ColumnOntology.get_snapshot()` raise `BDFDefinitionError`, chained from the cause, where they raised `requests.HTTPError`. `BDFDefinitionError` is a `RuntimeError`.
+
+### Added
+- `BDFDefinitionError` and `BDFDefinitionWarning`, exported from `bdf`.
+- `ColumnOntology.load_latest()` falls back to the newest local release that is not a pre-release, with a `BDFDefinitionWarning`, when upstream cannot be asked for its latest release or the release cannot be fetched. It raises `BDFDefinitionError` when no such release exists.
+
 
 ## [0.2.0] - 2026-11-03
 ### Breaking
