@@ -25,6 +25,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `bdf-update-battinfo VERSION` replaces `scripts/update_battinfo.py`. It needs a version, because BattINFO publishes no final release.
 
 ### Added
+- A sidecar is checked against the BattINFO release it states (`bdf.battinfo_version`), fetched once in each process when needed with a 5 s deadline. A bdf 0.2.0 sidecar is checked against `0.8.0rc2` by its `battinfo_ref`. `battinfo=` on `read`, `scan`, `save` and `ingest` names the release instead. A release that cannot be loaded or used falls back to the bundled release with a `BDFDefinitionWarning`, as the ontology does (#130).
 - `BDFDefinitionError` and `BDFDefinitionWarning`, exported from `bdf`.
 - `ontology=` on `ingest` and `Dataset.to_schemaorg_dataset`. `ingest` passes it to each read, save, and validation.
 - `ontology=` on `read`, `scan`, `save`, and `validate`. The call uses only that `ColumnOntology`; `COLUMN_ONTOLOGY` does not change.

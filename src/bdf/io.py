@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     import pandas as pd
 import polars as pl
 
-import bdf.battinfo
 from bdf._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataError, BDFMetadataWarning
 from bdf._time_scale import detect_scale_mismatch
 from bdf.battinfo import BattinfoSchema, _check_metadata
@@ -29,6 +28,7 @@ def _assemble_metadata(
     tz: str,
     day_month_order: DayMonthOrder | None = None,
     validate: bool = True,
+    battinfo: BattinfoSchema | None = None,
     stacklevel: int = 3,
 ) -> Metadata:
     """Take this read's metadata from exactly one source, never combined.
@@ -39,8 +39,10 @@ def _assemble_metadata(
             reserved sidecar sits beside ``path``.
         tz: IANA timezone forwarded to the plugin's metadata parser.
         day_month_order: Field order forwarded to the plugin's metadata parser.
-        validate: Raise for a BattINFO value that the bundled release refuses;
+        validate: Raise for a BattINFO value that the checked release refuses;
             False warns ``BDFMetadataWarning`` and keeps the value.
+        battinfo: BattINFO release to check against, instead of the release
+            the metadata states.
         stacklevel: ``warnings.warn`` stack level that reaches the caller, counted from ``_read``.
 
     Returns:
@@ -55,7 +57,7 @@ def _assemble_metadata(
             never a sidecar this read failed on. A later ``save()`` of that
             metadata would otherwise write over the file the read could not
             read.
-        BDFMetadataError: With ``validate``, the bundled BattINFO release
+        BDFMetadataError: With ``validate``, the checked BattINFO release
             refuses a value.
     """
     reserved = BdfSidecarParser()
@@ -70,9 +72,11 @@ def _assemble_metadata(
             path, tz=tz, day_month_order=day_month_order, preamble_lines=preamble_lines
         )
 
-    schema = bdf.battinfo.BATTINFO_SCHEMA
-    lines, _ = _check_metadata(metadata, path, schema=schema, stacklevel=stacklevel)
+    lines, schema = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel)
+    if schema is not None:
+        metadata.bdf.battinfo_version = schema.version
     if lines:
+        assert schema is not None
         msg = (
             f"BattINFO metadata read from {path} has values that release {schema.version!r} refuses. "
             "Correct the values, or pass validate=False to read them with a warning:\n  " + "\n  ".join(lines)
@@ -156,6 +160,7 @@ def _read(
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
     ontology: ColumnOntology | None = None,
+    battinfo: BattinfoSchema | None = None,
     stacklevel: int = 3,
 ) -> tuple[pl.DataFrame | pl.LazyFrame, Metadata, ColumnOntology]:
     """Read ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata, ontology)``.
@@ -181,7 +186,13 @@ def _read(
         raise ValueError(f"invalid plugin argument: {plugin!r}")
 
     metadata = _assemble_metadata(
-        path, resolved_plugin, tz=tz, day_month_order=day_month_order, validate=validate, stacklevel=stacklevel
+        path,
+        resolved_plugin,
+        tz=tz,
+        day_month_order=day_month_order,
+        validate=validate,
+        battinfo=battinfo,
+        stacklevel=stacklevel,
     )
     stated = metadata.bdf.ontology_version
     used, fell_back = _resolve_ontology(ontology, stated, path, stacklevel=stacklevel)
@@ -333,6 +344,7 @@ def read(
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
     ontology: ColumnOntology | None = None,
+    battinfo: BattinfoSchema | None = None,
 ) -> tuple[pl.DataFrame, Metadata]:
     """Read ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata)``.
 
@@ -344,7 +356,7 @@ def read(
         normalize: Map vendor columns to BDF canonical names (default True); False returns
             raw source columns unchanged.
         validate: Check columns against the BDF ontology, error if missing required columns,
-            and the BattINFO metadata against the bundled release, error on a refused value
+            and the BattINFO metadata against its release, error on a refused value
             (default True); set to False to only warn (``BDFMetadataWarning`` for the metadata).
         include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
         tz: IANA timezone used to compute ``Unix Time / s`` if the source has naive datetime.
@@ -366,6 +378,13 @@ def read(
             the bundled release with a ``BDFDefinitionWarning``, and the returned
             metadata keeps the stated release; otherwise its
             ``bdf.ontology_version`` names the release used.
+        battinfo: BattINFO release to check the entities against. Defaults to the
+            release that the sidecar states (``bdf.battinfo_version``, or a bdf 0.2.0
+            ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
+            5 s deadline; to the bundled release otherwise. A stated release that
+            cannot be loaded or used gives the bundled release with a
+            ``BDFDefinitionWarning``. The returned metadata's ``bdf.battinfo_version``
+            names the release checked against.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a DataFrame, and a ``Metadata``
@@ -375,7 +394,7 @@ def read(
 
     Raises:
         ValueError: If ``plugin`` is not None, a str, or a Plugin instance.
-        BDFMetadataError: With validate, the bundled BattINFO release refuses a value of the metadata.
+        BDFMetadataError: With validate, the checked BattINFO release refuses a value of the metadata.
     """
     bdf_df, metadata, _ = _read(
         path,
@@ -388,6 +407,7 @@ def read(
         day_month_order=day_month_order,
         reconcile_time=reconcile_time,
         ontology=ontology,
+        battinfo=battinfo,
     )
     return cast(pl.DataFrame, bdf_df), metadata
 
@@ -403,6 +423,7 @@ def scan(
     day_month_order: DayMonthOrder | None = None,
     reconcile_time: bool = False,
     ontology: ColumnOntology | None = None,
+    battinfo: BattinfoSchema | None = None,
 ) -> tuple[pl.LazyFrame, Metadata]:
     """Scan ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata)``.
 
@@ -419,7 +440,7 @@ def scan(
         normalize: Map vendor columns to BDF canonical names (default True); False returns
             raw source columns unchanged.
         validate: Check columns against the BDF ontology, raising on missing required ones,
-            and the BattINFO metadata against the bundled release, raising on a refused value
+            and the BattINFO metadata against its release, raising on a refused value
             (default True); False only warns (``BDFMetadataWarning`` for the metadata).
         include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
         tz: IANA timezone used to compute ``Unix Time / s`` if the source has naive datetime.
@@ -443,6 +464,13 @@ def scan(
             the bundled release with a ``BDFDefinitionWarning``, and the returned
             metadata keeps the stated release; otherwise its
             ``bdf.ontology_version`` names the release used.
+        battinfo: BattINFO release to check the entities against. Defaults to the
+            release that the sidecar states (``bdf.battinfo_version``, or a bdf 0.2.0
+            ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
+            5 s deadline; to the bundled release otherwise. A stated release that
+            cannot be loaded or used gives the bundled release with a
+            ``BDFDefinitionWarning``. The returned metadata's ``bdf.battinfo_version``
+            names the release checked against.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a LazyFrame, and a ``Metadata``
@@ -452,7 +480,7 @@ def scan(
 
     Raises:
         ValueError: If ``plugin`` is not None, a str, or a Plugin instance.
-        BDFMetadataError: With validate, the bundled BattINFO release refuses a value of the metadata.
+        BDFMetadataError: With validate, the checked BattINFO release refuses a value of the metadata.
     """
     bdf_df, metadata, _ = _read(
         path,
@@ -465,6 +493,7 @@ def scan(
         day_month_order=day_month_order,
         reconcile_time=reconcile_time,
         ontology=ontology,
+        battinfo=battinfo,
     )
     return cast(pl.LazyFrame, bdf_df), metadata
 

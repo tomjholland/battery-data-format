@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from ._errors import BDFValidationError
 from ._validate import validate
+from .battinfo import BattinfoSchema
 from .file_utils import ensure_dir as _ensure_dir, is_url as _is_url
 from .io import read, save
 from .spec import COLUMN_ONTOLOGY, ColumnOntology
@@ -171,6 +172,7 @@ def ingest(
     validate_converted: bool = True,
     include_unknown: bool = False,
     ontology: ColumnOntology | None = None,
+    battinfo: BattinfoSchema | None = None,
     plugin: str | None = None,
     incremental: bool = True,
     force: bool = False,
@@ -201,6 +203,7 @@ def ingest(
     - cell_metadata_dir: base dir for per-cell metadata folders (relative to out_dir)
     - validate_existing: validate files that already look like BDF
     - validate_converted: validate after conversion
+    - battinfo: BattINFO release for every read and save, instead of the release each file states.
     - ontology: ontology for every read, save and validation; by default each
       existing BDF file uses the release its sidecar states, and a converted file
       uses the bundled release
@@ -240,6 +243,7 @@ def ingest(
                     validate_converted=validate_converted,
                     include_unknown=include_unknown,
                     ontology=ontology,
+                    battinfo=battinfo,
                     plugin=plugin,
                     incremental=incremental,
                     force=force,
@@ -297,6 +301,7 @@ def ingest(
                     validate_converted=validate_converted,
                     include_unknown=include_unknown,
                     ontology=ontology,
+                    battinfo=battinfo,
                     plugin=plugin,
                     incremental=incremental,
                     force=force,
@@ -1503,7 +1508,7 @@ def ingest(
                 if layout_mode == "flat" and not collection_metadata:
                     df_for_meta = None
                     try:
-                        df_for_meta, _metadata = read(output_used, ontology=ontology)
+                        df_for_meta, _metadata = read(output_used, ontology=ontology, battinfo=battinfo)
                         df_for_meta = df_for_meta.to_pandas()
                     except Exception:
                         df_for_meta = None
@@ -1542,11 +1547,12 @@ def ingest(
                 validate=validate_converted,
                 include_unknown=include_unknown,
                 ontology=ontology,
+                battinfo=battinfo,
             )
             df = df_pl.to_pandas()
             out_path = _output_path(f)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            save(df, out_path, labels=labels, ontology=ontology)
+            save(df, out_path, labels=labels, ontology=ontology, battinfo=battinfo)
             converted_entry = {"path": str(f), "output": str(out_path)}
             if incremental:
                 key = _state_key(f)

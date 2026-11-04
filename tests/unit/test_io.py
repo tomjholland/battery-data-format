@@ -1664,8 +1664,6 @@ def test_a_plugin_read_of_a_refused_value_follows_validate(tmp_path: Path) -> No
 # A read checks against the release that the sidecar states
 # ---------------------------------------------------------------------------
 
-release_check_not_implemented = pytest.mark.xfail(strict=True, reason="sidecar release check not implemented")
-
 
 def _sidecar_beside_data(folder: Path, entity: dict, **stated: str) -> Path:
     """Write a data file and a sidecar whose ``battinfo_test`` is ``entity`` and whose ``bdf`` is ``stated``."""
@@ -1694,24 +1692,26 @@ def _assert_fell_back(meta: Metadata, caught: list[warnings.WarningMessage], sta
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_sidecar_from_another_release_is_checked_against_it(tmp_path: Path) -> None:
+    # The sidecar states 0.7.0, which is cached and allows "legacy_field"; the bundle would refuse it.
     cache_release(tmp_path, "0.7.0", release_docs("legacy_field"))
     bundled = bdf.battinfo.BATTINFO_SCHEMA
     p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
 
     meta, caught = _read_recording(p)
 
+    # No refusal: the read checked against 0.7.0.
     assert _battinfo_warnings(caught) == []
     assert meta.bdf.battinfo_version == "0.7.0"
+    # Reading an older file does not change the default set for other code in the process.
     assert bdf.battinfo.BATTINFO_SCHEMA is bundled
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_read_with_a_named_set_checks_against_it_and_loads_no_other_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The caller loads 0.8.0; then the network goes down.
     cache_release(tmp_path, "0.8.0", release_docs("new_field"))
     fake = _unreachable_github(monkeypatch)
     named = BattinfoSchema.from_version("0.8.0")
@@ -1719,19 +1719,23 @@ def test_a_read_with_a_named_set_checks_against_it_and_loads_no_other_release(
 
     meta, caught = _read_recording(p, battinfo=named)
 
+    # battinfo= overrides the sidecar's 0.7.0: 0.8.0 accepts "new_field", and nothing falls back.
     assert _battinfo_warnings(caught) == []
+    # The returned metadata names the release that checked it.
     assert meta.bdf.battinfo_version == "0.8.0"
+    # The stated 0.7.0 was never fetched.
     assert fake.urls == []
 
 
 @uses_cache
-@release_check_not_implemented
 def test_many_sidecars_at_an_unreachable_release_each_fall_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _unreachable_github(monkeypatch)
     bundled = bdf.battinfo.BATTINFO_SCHEMA.version
 
+    # A scan of many files: the source remembers the failed fetch, so the second read does not
+    # try again, but it must still fall back and warn on its own; a remembered failure is not silent.
     for folder in ("a", "b"):
         p = _sidecar_beside_data(tmp_path / folder, {"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
         meta, caught = _read_recording(p)
@@ -1739,7 +1743,6 @@ def test_many_sidecars_at_an_unreachable_release_each_fall_back(
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1755,22 +1758,23 @@ def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_0_2_0_sidecars_ref_is_read_as_release_0_8_0rc2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # As in the save test: 0.8.0rc2 is cached, and a stand-in 0.9.0 is the bundle.
     cache_release(tmp_path, "0.8.0rc2", bundled_docs())
     point_bundle_at(monkeypatch, tmp_path / "bundle", "0.9.0", release_docs("new_field"))
     p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_ref=_0_2_0_REF)
 
     meta, caught = _read_recording(p)
 
+    # No fall-back, and the returned metadata states the release in place of the commit.
     assert _battinfo_warnings(caught) == []
     assert meta.bdf.battinfo_version == "0.8.0rc2"
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_stated_release_that_is_not_a_version_is_replaced_by_the_bundle(tmp_path: Path) -> None:
     bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+    # A branch name, not a version: bdf cannot fetch it, so this is like a failed fetch.
     p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_version="main")
 
     meta, caught = _read_recording(p)
@@ -1779,8 +1783,8 @@ def test_a_stated_release_that_is_not_a_version_is_replaced_by_the_bundle(tmp_pa
 
 
 @uses_cache
-@release_check_not_implemented
 def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_path: Path) -> None:
+    # A cached 0.7.0 that loads but cannot check anything: its $ref names a document it does not hold.
     doc = {"$id": "https://example.test/test.schema.json", "properties": {"test": {"$ref": "missing.schema.json"}}}
     cache_release(tmp_path, "0.7.0", {"test.schema.json": doc})
     bundled = bdf.battinfo.BATTINFO_SCHEMA.version
@@ -1788,6 +1792,7 @@ def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_
 
     meta, caught = _read_recording(p)
 
+    # A release that cannot be used is treated like one that cannot be loaded.
     _assert_fell_back(meta, caught, "0.7.0", bundled)
 
 
