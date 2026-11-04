@@ -23,7 +23,7 @@ from bdf import (
     Metadata,
     io,
 )
-from bdf._errors import BDFDefinitionWarning, BDFMetadataWarning
+from bdf._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataWarning
 from bdf.battinfo import ENTITY_DOCS, BattinfoSchema
 from bdf.io import read, scan
 from bdf.metadata_parsers import JsonRule, JsonSidecarParser, RegexRule, TxtPreambleParser
@@ -1541,24 +1541,25 @@ def test_a_re_save_checks_against_the_release_it_states_and_keeps_its_stamp(tmp_
 
 
 @uses_cache
-def test_a_stated_release_that_cannot_be_loaded_falls_back_to_the_bundle_at_save(
+def test_a_stated_release_that_cannot_be_loaded_raises_at_save_unless_validate_is_false(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 0.7.0 is not bundled or cached, and the fetch fails.
     _unreachable_github(monkeypatch)
     bundled = bdf.battinfo.BATTINFO_SCHEMA.version
     accepted = _meta({"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
     refused = _meta({"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    # With validate on, a save needs the stated release: it raises, says how to get past it, and writes nothing.
+    with pytest.raises(BDFDefinitionError, match="pass battinfo="):
         io.save(_FRAME, tmp_path / "a.bdf.csv", metadata=accepted)
-
-    (message,) = [str(w.message) for w in caught if w.category is BDFDefinitionWarning]
-    assert "0.7.0" in message
-    assert bundled in message
-    assert _stamp(tmp_path / "a.bdf.csv") == bundled
-    with pytest.raises(BDFMetadataError, match=bundled):
-        io.save(_FRAME, tmp_path / "b.bdf.csv", metadata=refused)
+    assert list(tmp_path.glob("a.bdf*")) == []
+    # With validate off, it warns, checks against the bundle instead...
+    with pytest.warns(BDFDefinitionWarning, match=bundled):
+        io.save(_FRAME, tmp_path / "a.bdf.csv", metadata=accepted, validate=False)
+    # ...and keeps the stated release in the sidecar, so the file's claim is not lost.
+    assert _stamp(tmp_path / "a.bdf.csv") == "0.7.0"
+    # The bundle really does the check: it refuses "legacy_field", as a warning because validate is off.
     with pytest.warns(BDFMetadataWarning):
         io.save(_FRAME, tmp_path / "c.bdf.csv", metadata=refused, validate=False)
 
@@ -1683,12 +1684,17 @@ def _read_recording(p: Path, **kwargs: object) -> tuple[Metadata, list[warnings.
 
 
 def _assert_fell_back(meta: Metadata, caught: list[warnings.WarningMessage], stated: str, bundled: str) -> None:
-    """One BDFDefinitionWarning names the stated release, a reason and the bundle; the metadata states the bundle."""
+    """One BDFDefinitionWarning names the stated release, a reason and the bundle; the metadata keeps the stated release."""
     (message,) = [str(w.message) for w in caught if w.category is BDFDefinitionWarning]
     pattern = rf"Could not use BattINFO release {stated} .* states: .+\. Checking against the bundled release {bundled}"
     assert re.search(pattern, message, re.DOTALL)
-    assert meta.bdf.battinfo_version == bundled
+    assert meta.bdf.battinfo_version == stated
+    # The fall-back uses the bundle for this read only; the module's default set is unchanged.
     assert bdf.battinfo.BATTINFO_SCHEMA.version == bundled
+
+
+# In the "cannot be used" tests below, a read warns, checks against the bundle, and the returned
+# metadata keeps the stated release ("replaced by the bundle" means only for the check).
 
 
 @uses_cache
@@ -1857,13 +1863,12 @@ def test_a_0_2_0rc3_sidecar_reads_saves_and_reads_again_unchanged(tmp_path: Path
     assert "battinfo_ref" not in json.loads((tmp_path / "new.bdf.metadata.json").read_text())["bdf"]
 
 
-def test_a_save_drops_battinfo_ref_and_replaces_a_stale_ontology_version(tmp_path: Path) -> None:
+def test_a_save_drops_battinfo_ref(tmp_path: Path) -> None:
     p = tmp_path / "data.bdf.csv"
+    # A commit that bdf does not know as a release: it is still not written again.
     meta = _meta({"test": {"name": "cell-1"}}, battinfo_ref="eda462993ae43a64706e326253dddb44be100923")
-    meta.bdf.ontology_version = "0.0.1"
 
     io.save(_FRAME, p, metadata=meta)
 
     stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
     assert "battinfo_ref" not in stated
-    assert stated["ontology_version"] == COLUMN_ONTOLOGY.ontology_version

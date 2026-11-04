@@ -12,7 +12,7 @@ import polars as pl
 
 from bdf._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataError, BDFMetadataWarning
 from bdf._time_scale import detect_scale_mismatch
-from bdf.battinfo import BattinfoSchema, _check_metadata
+from bdf.battinfo import BattinfoSchema, _check_metadata, stated_release
 from bdf.file_utils import open_compressed, strip_compression_suffix
 from bdf.metadata import Metadata
 from bdf.metadata_parsers import BdfSidecarParser
@@ -79,8 +79,8 @@ def _assemble_metadata(
         metadata.bdf.source = source
         metadata.bdf.created_with = bdf.__version__
 
-    lines, schema = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel + 1)
-    if schema is not None:
+    lines, schema, fell_back = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel + 1)
+    if schema is not None and not fell_back:
         metadata.bdf.battinfo_version = schema.version
     if lines:
         assert schema is not None
@@ -389,8 +389,9 @@ def read(
             ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
             5 s deadline; to the bundled release otherwise. A stated release that
             cannot be loaded or used gives the bundled release with a
-            ``BDFDefinitionWarning``. The returned metadata's ``bdf.battinfo_version``
-            names the release checked against.
+            ``BDFDefinitionWarning``, and the returned metadata keeps the stated
+            release; otherwise its ``bdf.battinfo_version`` names the release
+            checked against.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a DataFrame, and a ``Metadata``
@@ -475,8 +476,9 @@ def scan(
             ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
             5 s deadline; to the bundled release otherwise. A stated release that
             cannot be loaded or used gives the bundled release with a
-            ``BDFDefinitionWarning``. The returned metadata's ``bdf.battinfo_version``
-            names the release checked against.
+            ``BDFDefinitionWarning``, and the returned metadata keeps the stated
+            release; otherwise its ``bdf.battinfo_version`` names the release
+            checked against.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a LazyFrame, and a ``Metadata``
@@ -571,41 +573,42 @@ def _as_polars(df: pl.DataFrame | pl.LazyFrame | pd.DataFrame) -> pl.DataFrame |
     return pl.DataFrame(df)
 
 
-def _version_stamps(ontology_version: str | None, schema: BattinfoSchema | None) -> dict[str, str | None]:
+def _version_stamps(ontology_version: str | None, battinfo_version: str | None) -> dict[str, str | None]:
     """Return the stamps a written sidecar carries (GH #106).
 
     Args:
         ontology_version: The ontology release that the sidecar states: the
             release the table was checked against, or the stated release
             where ``save(validate=False)`` fell back.
-        schema: The BattINFO release that the save checked the entities
-            against, or None where no entity holds data.
+        battinfo_version: The BattINFO release that the save checked the
+            entities against, or the stated release where ``save(validate=False)``
+            fell back; None where no entity holds data.
 
     Returns:
         ``bdf_version`` (the installed package version), ``ontology_version``
-        (the release of ``ontology``), and ``battinfo_version`` (the release
-        of ``schema``, or None).
+        (the release of ``ontology``), and ``battinfo_version``.
     """
     import bdf
 
     return {
         "bdf_version": bdf.__version__,
         "ontology_version": ontology_version,
-        "battinfo_version": schema.version if schema is not None else None,
+        "battinfo_version": battinfo_version,
     }
 
 
 _WRITER_STAMPS = ("bdf_version", "ontology_version", "battinfo_version", "battinfo_ref")
 
 
-def _sidecar_text(metadata: Metadata, ontology_version: str | None, schema: BattinfoSchema | None) -> str | None:
+def _sidecar_text(metadata: Metadata, ontology_version: str | None, battinfo_version: str | None) -> str | None:
     """Return the sidecar text for ``metadata``, or None where it carries nothing.
 
     The text is stamped with the writer's versions (GH #106):
     ``bdf.bdf_version``, ``bdf.ontology_version`` (the release that the table
     was checked against, or the stated release where ``save(validate=False)``
     fell back) and ``bdf.battinfo_version`` (the release that the
-    entities were checked against, absent where no entity holds data). The
+    entities were checked against, or the stated release after a
+    ``validate=False`` fall-back; absent where no entity holds data). The
     stamps identify the file's writer, so they replace any stamps the caller's
     object carries, and an old ``battinfo_ref`` is dropped. The caller's
     object is not modified. A ``Metadata`` that carries nothing gives None:
@@ -615,7 +618,7 @@ def _sidecar_text(metadata: Metadata, ontology_version: str | None, schema: Batt
         metadata: Metadata to write. Only the values that differ from their
             defaults reach the text.
         ontology_version: The ontology release that the sidecar states.
-        schema: The BattINFO release that the save checked the entities against.
+        battinfo_version: The BattINFO release that the sidecar states.
 
     Raises:
         ValueError: A value that JSON cannot hold, such as a ``numpy.int64``.
@@ -630,7 +633,7 @@ def _sidecar_text(metadata: Metadata, ontology_version: str | None, schema: Batt
         stamps.pop(key, None)
     if "source" not in stamps and "created_with" not in stamps:
         stamps["created_with"] = bdf.__version__
-    stamps.update({k: v for k, v in _version_stamps(ontology_version, schema).items() if v})
+    stamps.update({k: v for k, v in _version_stamps(ontology_version, battinfo_version).items() if v})
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -682,16 +685,18 @@ def save(
         battinfo: BattINFO release to check the entities of ``metadata`` against,
             and to state in the sidecar. Defaults to the release that ``metadata``
             states in ``bdf.battinfo_version``, else the bundled release. A stated
-            release that cannot be loaded or used gives the bundled release, with
-            a ``BDFDefinitionWarning``.
+            release that cannot be loaded or used raises, unless
+            ``validate=False``: then the entities are checked against the
+            bundled release with a ``BDFDefinitionWarning``, and the sidecar
+            keeps the stated release.
         **opts: Additional keyword arguments forwarded to the polars writer
             (``write_csv``/``write_parquet``/``write_ipc``/``write_json``/``write_ndjson``/
             ``write_excel``), or to the matching ``sink_*`` writer where ``df`` is a
             streamed ``LazyFrame``.
 
     Raises:
-        BDFDefinitionError: If ``validate`` and the ontology release that
-            ``metadata`` states cannot be loaded. Nothing is written.
+        BDFDefinitionError: If ``validate`` and the ontology or BattINFO release
+            that ``metadata`` states cannot be loaded or used. Nothing is written.
         ValueError: If the format is unsupported, or compression is requested for xlsx output.
         FileExistsError: If ``metadata`` is omitted and a ``.metadata.json`` sidecar
             already sits beside the target.
@@ -725,7 +730,9 @@ def save(
 
     text: str | None = None
     if metadata is not None:
-        lines, schema = _check_metadata(metadata, sidecar, schema=battinfo, stacklevel=2)
+        lines, schema, battinfo_fell_back = _check_metadata(
+            metadata, sidecar, schema=battinfo, strict=validate, stacklevel=2
+        )
         if lines and schema is not None:
             msg = (
                 f"The BattINFO metadata for {sidecar} does not pass the check against release {schema.version!r}. "
@@ -735,7 +742,12 @@ def save(
             if validate:
                 raise BDFMetadataError(msg)
             warnings.warn(msg, BDFMetadataWarning, stacklevel=2)
-        text = _sidecar_text(metadata, stated if fell_back else used.ontology_version or None, schema)
+        battinfo_version = None
+        if battinfo_fell_back:
+            battinfo_version = stated_release(metadata)
+        elif schema is not None:
+            battinfo_version = schema.version
+        text = _sidecar_text(metadata, stated if fell_back else used.ontology_version or None, battinfo_version)
 
     if isinstance(frame, pl.LazyFrame) and spec.sink is not None:
         writer = getattr(frame, spec.sink)

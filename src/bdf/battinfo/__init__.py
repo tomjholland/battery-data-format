@@ -240,31 +240,50 @@ BATTINFO_SCHEMA: BattinfoSchema = BattinfoSchema.build()
 _UNUSABLE = (referencing.exceptions.Unresolvable, re.error, RecursionError, BDFDefinitionError)
 
 
-def _warn_fall_back(stated: str, where: str | Path, reason: object, stacklevel: int) -> None:
+def _fall_back(stated: str, where: str | Path, reason: BaseException, strict: bool, stacklevel: int) -> None:
+    """Warn that the bundle stands in for a stated release, or with ``strict`` raise."""
+    bundled = BATTINFO_SCHEMA.version
+    if strict:
+        raise BDFDefinitionError(
+            f"Could not use BattINFO release {stated} that {where}'s metadata states: {reason}. "
+            f"Connect or cache the release, pass battinfo=, or pass validate=False to check "
+            f"against the bundled release {bundled} and keep release {stated}."
+        ) from reason
     warnings.warn(
         f"Could not use BattINFO release {stated} that {where}'s metadata states: {reason}. "
-        f"Checking against the bundled release {BATTINFO_SCHEMA.version}.",
+        f"Checking against the bundled release {bundled}.",
         BDFDefinitionWarning,
         stacklevel=stacklevel + 1,
     )
 
 
-def _release_schema(stated: str | None, where: str | Path, *, stacklevel: int) -> BattinfoSchema:
+def _release_schema(
+    stated: str | None, where: str | Path, *, strict: bool = False, stacklevel: int
+) -> tuple[BattinfoSchema, bool]:
     """Return the schema set for the release that metadata states, or the bundle.
 
     A stated release that cannot be named or loaded gives the bundle, with a
-    ``BDFDefinitionWarning``. ``stacklevel`` counts from this function's caller.
+    ``BDFDefinitionWarning``, and True as the second value. ``stacklevel``
+    counts from this function's caller.
+
+    Raises:
+        BDFDefinitionError: If ``strict`` and the stated release cannot be loaded.
     """
     if not stated:
-        return BATTINFO_SCHEMA
+        return BATTINFO_SCHEMA, False
     try:
         name = BATTINFO_SOURCE.normalise(stated)
         if name == BATTINFO_SOURCE.normalise(BATTINFO_SCHEMA.version):
-            return BATTINFO_SCHEMA
-        return BATTINFO_SOURCE.get(name, timeout=READ_FETCH_TIMEOUT)
+            return BATTINFO_SCHEMA, False
+        return BATTINFO_SOURCE.get(name, timeout=READ_FETCH_TIMEOUT), False
     except BDFDefinitionError as exc:
-        _warn_fall_back(stated, where, exc, stacklevel + 1)
-        return BATTINFO_SCHEMA
+        _fall_back(stated, where, exc, strict, stacklevel + 1)
+        return BATTINFO_SCHEMA, True
+
+
+def stated_release(metadata: Metadata) -> str | None:
+    """Return the BattINFO release that ``metadata`` states, directly or by a 0.2.0 ``battinfo_ref``."""
+    return metadata.bdf.battinfo_version or _REF_RELEASES.get(metadata.bdf.battinfo_ref or "")
 
 
 def _refusals(schema: BattinfoSchema, metadata: Metadata) -> list[str]:
@@ -272,8 +291,13 @@ def _refusals(schema: BattinfoSchema, metadata: Metadata) -> list[str]:
 
 
 def _check_metadata(
-    metadata: Metadata, where: str | Path, *, schema: BattinfoSchema | None = None, stacklevel: int
-) -> tuple[list[str], BattinfoSchema | None]:
+    metadata: Metadata,
+    where: str | Path,
+    *,
+    schema: BattinfoSchema | None = None,
+    strict: bool = False,
+    stacklevel: int,
+) -> tuple[list[str], BattinfoSchema | None, bool]:
     """Return the refusal lines of the six entities, and the set that gave them.
 
     Args:
@@ -282,25 +306,28 @@ def _check_metadata(
         schema: The set to check against. Without it: the release that the
             metadata states, else the bundle, falling back to the bundle with a
             ``BDFDefinitionWarning`` where the stated release cannot be used.
+        strict: Raise ``BDFDefinitionError``, rather than fall back, where the
+            stated release cannot be used.
         stacklevel: ``warnings.warn`` stack level, counted from the caller.
 
     Returns:
-        ``([], None)`` where no entity holds data; otherwise the lines and the
-        set they were checked against. A refused value never raises.
+        ``([], None, False)`` where no entity holds data; otherwise the lines,
+        the set they were checked against, and whether that is the bundle in
+        place of a stated release. A refused value never raises.
     """
     if not any(getattr(metadata, entity) for entity in ENTITY_DOCS):
-        return [], None
+        return [], None, False
     if schema is not None:
-        return _refusals(schema, metadata), schema
-    stated = metadata.bdf.battinfo_version or _REF_RELEASES.get(metadata.bdf.battinfo_ref or "")
-    schema = _release_schema(stated, where, stacklevel=stacklevel + 1)
+        return _refusals(schema, metadata), schema, False
+    stated = stated_release(metadata)
+    schema, fell_back = _release_schema(stated, where, strict=strict, stacklevel=stacklevel + 1)
     try:
-        return _refusals(schema, metadata), schema
+        return _refusals(schema, metadata), schema, fell_back
     except _UNUSABLE as exc:
         if schema is BATTINFO_SCHEMA:
             raise
-        _warn_fall_back(str(stated), where, exc, stacklevel + 1)
-        return _refusals(BATTINFO_SCHEMA, metadata), BATTINFO_SCHEMA
+        _fall_back(str(stated), where, exc, strict, stacklevel + 1)
+        return _refusals(BATTINFO_SCHEMA, metadata), BATTINFO_SCHEMA, True
 
 
 def _update_snapshot_cli() -> None:
