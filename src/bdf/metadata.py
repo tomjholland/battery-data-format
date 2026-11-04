@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import Field
 
@@ -23,6 +23,9 @@ except Exception:  # pragma: no cover
     pd = None  # type: ignore
 
 from bdf import spec
+
+if TYPE_CHECKING:
+    from bdf.battinfo import BattinfoSchema
 
 # The generated root class carries the schema title verbatim; the short name
 # is the public one, matching the record field it types.
@@ -106,6 +109,18 @@ class Metadata(_RecordModel):
     key no rule maps is preserved by ``raw`` instead. It never holds a failed
     value, because such a value raises. ``None`` when a read staged nothing
     here. Written by `save()` and restored on a later read."""
+
+    def check(self, schema: BattinfoSchema | None = None) -> list[str]:
+        """Return one line for each BattINFO value that a release refuses.
+
+        Args:
+            schema: The release to check against. Without it, the release that
+                a save checks against: the one this metadata states, else the bundle.
+
+        Returns:
+            The lines, or ``[]``. A refused value never raises.
+        """
+        raise NotImplementedError
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

@@ -8,8 +8,16 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from conftest import DATA
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
+from referencing import Registry
+from referencing.jsonschema import DRAFT202012
 
+import bdf.battinfo
+from bdf._errors import BDFMetadataWarning
+from bdf.battinfo import ENTITY_DOCS
+from bdf.io import read
 from bdf.plugins import (
     BDF_NORMALIZER,
     BIOLOGIC_MPT,
@@ -29,6 +37,10 @@ from bdf.plugins import (
 from bdf.spec import COLUMN_ONTOLOGY
 from bdf.table_normalizers import NORMALIZERS, Syn, TableNormalizer
 from bdf.table_parsers import DelimTxtParser
+
+not_implemented = pytest.mark.xfail(strict=True, reason="BattINFO runtime schema not implemented")
+
+CYCLER_FIXTURES = [path for folder in ("mpr", "nda", "res") for path in sorted((DATA / folder).iterdir())]
 
 
 class TestPluginDict:
@@ -210,6 +222,7 @@ class TestMaccorPreamble:
             ("23-Jan-20 10:31:41", 1579775501),
         ],
     )
+    @not_implemented
     def test_maccor_preamble_reads_every_declared_header_shape(
         self, tmp_path: Path, header: str, expected: int
     ) -> None:
@@ -224,7 +237,7 @@ class TestMaccorPreamble:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             meta = MACCOR_CSV.metadata_parser.parse(p)
-        assert meta.battinfo_test.test.started_at == expected  # type: ignore[union-attr]
+        assert meta.battinfo_test["test"]["started_at"] == expected
 
 
 class TestDetectFromColumns:
@@ -473,3 +486,50 @@ class TestArbinXlsxDetection:
         )
         plugin_id, _ = detect(path)
         assert plugin_id == "neware_xlsx"
+
+
+def _with_context(errors):
+    """Yield each error, and each error of its ``context``, at any depth."""
+    for error in errors:
+        yield error
+        yield from _with_context(error.context or ())
+
+
+@not_implemented
+def test_every_shipped_rule_target_is_a_schema_path() -> None:
+    """A value staged at a shipped target is never an unknown key, and its path never goes below a non-object."""
+    schema = bdf.battinfo.BATTINFO_SCHEMA
+    registry = Registry().with_resources(
+        (doc["$id"], DRAFT202012.create_resource({k: v for k, v in doc.items() if k != "$schema"}))
+        for doc in schema.docs.values()
+    )
+    for plugin_id, plugin in PLUGINS.items():
+        for target, _rule in plugin.metadata_parser.rules:
+            if target.kind != "metadata":
+                continue
+            staged: dict = {}
+            target.stage(staged, "x")
+            entity, *below = target.path
+            validator = Draft202012Validator(schema.docs[ENTITY_DOCS[entity]], registry=registry)
+            for error in _with_context(validator.iter_errors(staged[entity])):
+                where = f"{plugin_id}: {'.'.join(target.path)}: {error.message}"
+                assert error.validator != "additionalProperties", where
+                above = list(error.absolute_path)
+                assert not (error.validator == "type" and above == below[: len(above)] and len(above) < len(below)), (
+                    where
+                )
+
+
+@pytest.mark.parametrize("fixture", CYCLER_FIXTURES, ids=lambda path: path.name)
+def test_each_cycler_fixture_reads_with_no_metadata_warning(fixture: Path) -> None:
+    """The metadata a shipped plugin makes from a real file is accepted by the bundled release."""
+    # The read checks the plugin's metadata against the bundled release: a refused value raises
+    # BDFMetadataError (validate is on), and the test also fails on any BDFMetadataWarning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            read(fixture)
+        except RuntimeError as exc:  # an optional reader is not installed
+            pytest.skip(str(exc))
+
+    assert not [w for w in caught if issubclass(w.category, BDFMetadataWarning)]
