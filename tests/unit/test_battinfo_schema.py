@@ -15,7 +15,7 @@ import referencing.exceptions
 
 import bdf.battinfo
 from bdf._errors import BDFDefinitionError
-from bdf.battinfo import BATTINFO_SOURCE, ENTITY_DOCS, BattinfoSchema, _download_battinfo, _update_snapshot_cli
+from bdf.battinfo import BATTINFO_SOURCE, FIELD_SCHEMAS, BattinfoSchema, _download_battinfo, _update_snapshot_cli
 from bdf.metadata import Metadata
 
 from ._battinfo import (
@@ -46,7 +46,7 @@ def test_the_bundled_set_is_the_release_the_version_file_names() -> None:
     schema = bdf.battinfo.BATTINFO_SCHEMA
     assert schema.version == (BUNDLED / "VERSION").read_text().strip()
     # ...and it holds a document for each of the six entities that Metadata carries.
-    assert set(ENTITY_DOCS.values()) <= set(schema.docs)
+    assert set(FIELD_SCHEMAS.values()) <= set(schema.docs)
 
 
 def test_from_version_gives_a_new_set_and_caches_a_fetched_release(
@@ -116,7 +116,7 @@ def test_the_update_command_needs_a_version(monkeypatch: pytest.MonkeyPatch) -> 
 
 def _fetchable_docs() -> dict[str, dict[str, Any]]:
     """Six entity documents; two of them refer to one document, which refers up to another."""
-    docs: dict[str, dict[str, Any]] = {path: {"$id": f"https://example.test/{path}"} for path in ENTITY_DOCS.values()}
+    docs: dict[str, dict[str, Any]] = {path: {"$id": f"https://example.test/{path}"} for path in FIELD_SCHEMAS.values()}
     docs["test.schema.json"]["description"] = "µ"
     docs["test.schema.json"]["properties"] = {
         "a": {"$ref": "modules/common/quantity.schema.json"},
@@ -237,9 +237,9 @@ def test_a_partial_record_is_valid_also_in_a_document_that_a_ref_reaches() -> No
     schema = BattinfoSchema({"test.schema.json": outer, "b.schema.json": inner}, "0.1.0")
 
     # The inner record's "required" is ignored too, after the $ref: an empty "x" is accepted...
-    assert schema.refusals("battinfo_test", {"x": {}}) == []
+    assert schema.check("battinfo_test", {"x": {}}) == []
     # ...but the other keywords there still apply: "a" must be a string.
-    assert len(schema.refusals("battinfo_test", {"x": {"a": 1}})) == 1
+    assert len(schema.check("battinfo_test", {"x": {"a": 1}})) == 1
 
 
 def test_a_quantity_with_a_value_and_no_unit_is_refused() -> None:
@@ -249,7 +249,7 @@ def test_a_quantity_with_a_value_and_no_unit_is_refused() -> None:
     test = {"test": {"conditions": {"ambient_temperature": {"value": 25}}}}
 
     assert any(
-        "battinfo_test.test.conditions.ambient_temperature" in line for line in schema.refusals("battinfo_test", test)
+        "battinfo_test.test.conditions.ambient_temperature" in line for line in schema.check("battinfo_test", test)
     )
 
 
@@ -257,9 +257,9 @@ def test_a_map_keeps_the_keys_that_its_schema_declares() -> None:
     schema = bdf.battinfo.BATTINFO_SCHEMA
 
     # "conditions" is a map whose keys must match a pattern: a snake_case key is accepted...
-    assert schema.refusals("battinfo_test", {"test": {"conditions": {"ambient_temperature": UNIT_TEXT}}}) == []
+    assert schema.check("battinfo_test", {"test": {"conditions": {"ambient_temperature": UNIT_TEXT}}}) == []
     # ...and a key with a space and capitals gives one line, which names the map and the bad key.
-    (line,) = schema.refusals("battinfo_test", {"test": {"conditions": {"Bad Key": UNIT_TEXT}}})
+    (line,) = schema.check("battinfo_test", {"test": {"conditions": {"Bad Key": UNIT_TEXT}}})
     assert "battinfo_test.test.conditions" in line
     assert "Bad Key" in line
 
@@ -268,17 +268,17 @@ def test_a_choice_between_schemas_is_decided_as_a_whole() -> None:
     schema = bdf.battinfo.BATTINFO_SCHEMA
 
     # main_entity is either one object or a list of them; the list form is accepted.
-    assert schema.refusals("battinfo_dataset", {"dataset": {"main_entity": [{"url": "data.csv"}]}}) == []
+    assert schema.check("battinfo_dataset", {"dataset": {"main_entity": [{"url": "data.csv"}]}}) == []
     # One object with an unknown key fails both branches. The line names the branch that came
     # closest (the object, with its unknown key), not "is not valid under any of the given schemas".
-    (line,) = schema.refusals("battinfo_dataset", {"dataset": {"main_entity": {"url": "data.csv", "bogus": 1}}})
+    (line,) = schema.check("battinfo_dataset", {"dataset": {"main_entity": {"url": "data.csv", "bogus": 1}}})
     assert "battinfo_dataset.dataset.main_entity" in line
     assert "'bogus' was unexpected" in line
 
 
 def test_an_unknown_key_is_refused_where_the_schema_closes_the_object() -> None:
     # A misspelled field name: "test" does not allow other keys.
-    (line,) = bdf.battinfo.BATTINFO_SCHEMA.refusals("battinfo_test", {"test": {"nmae": "cell-1"}})
+    (line,) = bdf.battinfo.BATTINFO_SCHEMA.check("battinfo_test", {"test": {"nmae": "cell-1"}})
 
     # The line names the object that refused the key, and the key.
     assert "battinfo_test.test:" in line
@@ -290,10 +290,10 @@ def test_an_empty_entity_needs_no_document_and_data_needs_one() -> None:
     schema = BattinfoSchema({}, "0.1.0")
 
     # An empty entity is not checked, so it needs no document...
-    assert schema.refusals("battinfo_test", {}) == []
+    assert schema.check("battinfo_test", {}) == []
     # ...but an entity with data cannot be checked without its document, and the error names that document.
     with pytest.raises(BDFDefinitionError, match="test.schema.json"):
-        schema.refusals("battinfo_test", {"test": {}})
+        schema.check("battinfo_test", {"test": {}})
 
 
 def test_a_refused_value_can_be_assigned_and_check_names_it() -> None:

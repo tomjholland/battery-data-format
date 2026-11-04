@@ -28,7 +28,7 @@ class _RecordModel(BaseModel):
     def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
         """Yield only the fields that differ from their default, for ``repr`` and ``str``."""
         for name, info in type(self).model_fields.items():
-            value = getattr(self, name)
+            value = self.__dict__[name]  # not getattr: a deprecated field would warn
             if value != info.get_default(call_default_factory=True):
                 yield name, value
 
@@ -36,63 +36,57 @@ class _RecordModel(BaseModel):
         """Serialise this record to a plain dict.
 
         Returns:
-            The model dumped in JSON mode with ``exclude_defaults=True``, so a
-            field left at its default (``None``, or an empty entity dict) is
-            absent from the result.
+            The fields that differ from their default, as JSON values. An empty
+            field (``None``, or an empty ``battinfo_*`` dict) is left out.
         """
         return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class BdfReadInfo(_RecordModel):
-    """BDF-owned read audit facts, kept out of the BattINFO records.
+    """bdf's own record of where the data came from and which versions wrote and checked it.
 
-    The fields fall in three groups. The origin fields (``source``,
-    ``created_with``, ``time_reconciliation``) say where the data came
-    from: a read from a source that is not a sidecar sets them, and every
-    later read and save passes them through unchanged. The writer stamps
-    (``bdf_version``, ``ontology_version``) describe the sidecar file, so
-    ``save()`` replaces them. ``battinfo_version`` names the release the
-    entities were checked against.
+    ``source``, ``created_with`` and ``time_reconciliation`` describe the
+    original read, and later reads and saves keep them. ``save()`` sets
+    ``bdf_version``, ``ontology_version`` and ``battinfo_version`` on each
+    sidecar it writes.
     """
 
     source: str | None = None
     """The plugin that read the data, or ``"custom"``."""
     created_with: str | None = None
-    """The batterydf version that first read the data from its source. Empty
-    for a sidecar that an older bdf wrote."""
+    """The batterydf version that first read the data from its source, or that
+    saved metadata built in code. None in a sidecar from bdf before 0.3."""
     time_reconciliation: list[dict] | None = None
+    """Each rescale of the time columns that the read applied."""
     bdf_version: str | None = None
-    """The batterydf package version that wrote this sidecar. Stamped by
-    ``save()`` on every sidecar it writes, overwriting any earlier stamp: the
-    stamps identify the file's writer, so a read-then-save records the version
-    that performed the save, not the one that wrote the file it read."""
+    """The batterydf version that wrote this sidecar."""
     ontology_version: str | None = None
-    """The BDF ontology release the writer's column spec was pinned to."""
-    battinfo_ref: str | None = None
-    """Deprecated. The upstream BattINFO commit that bdf 0.2.0 stamped. It
-    still reads, and a save drops it and states ``battinfo_version`` instead."""
+    """The BDF ontology release of the columns."""
+    battinfo_ref: str | None = Field(
+        default=None,
+        deprecated="bdf.battinfo_ref is the BattINFO commit that bdf 0.2.0 wrote; use bdf.battinfo_version",
+        exclude=True,
+    )
+    """Deprecated: the BattINFO commit that bdf 0.2.0 wrote. A read still
+    accepts it; a save writes ``battinfo_version`` in its place."""
     battinfo_version: str | None = None
-    """The BattINFO release the entities follow. ``save()`` stamps the release
-    it checked them against; set it to move the metadata to another release."""
+    """The BattINFO release of the ``battinfo_*`` fields. Set it to check
+    against another release."""
 
 
 class Metadata(_RecordModel):
-    """The metadata a BDF read returns: the BattINFO entity records, BDF's own
-    read audit section, the verbatim source a parser read, and the values a
-    rule staged deliberately.
+    """The metadata that a read returns and a save writes to the sidecar.
 
-    Each entity is a plain dict in the shape of its BattINFO document
-    (``meta.battinfo_test["test"]["instrument_name"]``), so a caller who
-    already speaks BattINFO finds nothing to translate. A dict keeps each value
-    as it was written: nothing checks or converts it on assignment.
-    :meth:`check` names the values that a BattINFO release refuses, and a read
-    or a save runs the same check. The saved sidecar serialises this same shape.
+    The six ``battinfo_*`` fields (``battinfo_test``, ``battinfo_cell``,
+    ``battinfo_channel``, ``battinfo_equipment``, ``battinfo_test_protocol``,
+    ``battinfo_dataset``) each hold a plain dict in the shape of one BattINFO
+    schema, for example ``meta.battinfo_test["test"]["instrument_name"]``.
+    Values are stored as given. :meth:`check` lists the values that the
+    BattINFO release refuses; a read and a save run the same check.
     """
 
-    # An upstream schema sets `additionalProperties: false` at its root, so
-    # `bdf`, `raw`, and `extras` cannot live inside a record. Each wrapper key
-    # joins `battinfo_` to the upstream entity type, which also keeps a
-    # sidecar document distinct from a record document.
+    # A BattINFO schema allows no extra keys at its root, so `bdf`, `raw` and
+    # `extras` sit beside the `battinfo_*` fields, not inside them.
     battinfo_test: dict[str, Any] = Field(default_factory=dict)
     """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
     battinfo_cell: dict[str, Any] = Field(default_factory=dict)
@@ -110,33 +104,25 @@ class Metadata(_RecordModel):
     record automatically yet: it is the documented place for a user or a downstream
     tool (e.g. the battinfo package) to record file-level provenance (#92)."""
     bdf: BdfReadInfo = Field(default_factory=BdfReadInfo)
-    """BDF's own audit of this read: the source it read, and every rescale that the time reconciliation applied."""
+    """bdf's own record: where the data came from, and the versions that wrote and checked it."""
 
     raw: dict[str, Any] | str | None = None
-    """The source a parser read, verbatim: the decoded JSON document for a
-    JSON-backed parser, the preamble text a text parser matched against, or
-    ``None`` when a read captured no source. Holds every key a rule did not
-    map, nested keys and array elements included, with no traversal required
-    to keep it lossless. A parser reading BDF's own sidecar restores this
-    field rather than recapturing the document, so a repeated save and read
-    never nests a copy of the sidecar inside itself. Written by `save()` and
-    restored on a later read."""
+    """The vendor metadata as the parser read it: the JSON document, or the
+    preamble text. Keeps every value, also those that no rule maps. None
+    where the read had no vendor metadata."""
     extras: dict[str, Any] | None = None
-    """Keys a rule staged under an explicit extras target, verbatim (JSON
-    ``null`` values included). Nothing reaches this field automatically: a
-    key no rule maps is preserved by ``raw`` instead. It never holds a failed
-    value, because such a value raises. ``None`` when a read staged nothing
-    here. Written by `save()` and restored on a later read."""
+    """A free dict for any other values to keep with the data. A plugin rule
+    can put a value here with ``METADATA.extras["key"]``."""
 
     def check(self, schema: BattinfoSchema | None = None) -> list[str]:
         """Return one line for each BattINFO value that a release refuses.
 
         Args:
-            schema: The release to check against. Without it, the release that
-                a save checks against: the one this metadata states, else the bundle.
+            schema: The release to check against. Default: the release in
+                ``bdf.battinfo_version``, else the bundled release.
 
         Returns:
-            The lines, or ``[]``. A refused value never raises.
+            The lines, or ``[]`` where every value is accepted.
 
         Warns:
             BDFDefinitionWarning: Without ``schema``, when the stated release

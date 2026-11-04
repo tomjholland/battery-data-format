@@ -32,7 +32,7 @@ from bdf._errors import BDFDefinitionError, BDFDefinitionWarning
 if TYPE_CHECKING:
     from bdf.metadata import Metadata
 
-ENTITY_DOCS: dict[str, str] = {
+FIELD_SCHEMAS: dict[str, str] = {
     "battinfo_test": "test.schema.json",
     "battinfo_cell": "cell-instance.schema.json",
     "battinfo_channel": "channel.schema.json",
@@ -40,7 +40,7 @@ ENTITY_DOCS: dict[str, str] = {
     "battinfo_test_protocol": "test-protocol.schema.json",
     "battinfo_dataset": "dataset.schema.json",
 }
-"""Each Metadata entity field and the path of its document under ``schemas/``."""
+"""Each ``battinfo_*`` field of ``Metadata``, and the path under ``schemas/`` of the schema that checks it."""
 
 # The BattINFO commit that bdf 0.2.0 stamped as ``battinfo_ref``, and the
 # release with the same schemas.
@@ -123,34 +123,34 @@ class BattinfoSchema:
         """
         return BATTINFO_SOURCE.get(version, refresh=refresh)
 
-    def refusals(self, entity: str, data: Mapping[str, Any]) -> list[str]:
-        """Return one line for each value of ``data`` that the entity's document refuses.
+    def check(self, field: str, data: Mapping[str, Any]) -> list[str]:
+        """Return one line for each value in ``data`` that the schema for ``field`` refuses.
 
         Args:
-            entity: A key of ``ENTITY_DOCS``.
-            data: The entity's dict.
+            field: A ``battinfo_*`` field of ``Metadata``, such as ``"battinfo_test"``.
+            data: The value of that field.
 
         Raises:
-            KeyError: If ``entity`` is not in ``ENTITY_DOCS``.
-            BDFDefinitionError: If ``data`` is not empty and the set has no document for ``entity``.
+            KeyError: If ``field`` is not a ``battinfo_*`` field.
+            BDFDefinitionError: If ``data`` is not empty and the set has no schema for ``field``.
             referencing.exceptions.Unresolvable: If a ``$ref`` names no document.
             re.error: If a ``pattern`` does not compile.
             RecursionError: If references loop.
         """
-        path = ENTITY_DOCS[entity]
+        path = FIELD_SCHEMAS[field]
         if not data:
             return []
-        validator = self._validators.get(entity)
+        validator = self._validators.get(field)
         if validator is None:
             if path not in self._contents:
-                raise BDFDefinitionError(f"BattINFO {self.version} has no document {path} for {entity}")
-            validator = self._validators[entity] = _Validator(self._contents[path], registry=self._registry)
+                raise BDFDefinitionError(f"BattINFO {self.version} has no document {path} for {field}")
+            validator = self._validators[field] = _Validator(self._contents[path], registry=self._registry)
         lines = []
         for error in sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path)):
             # A combinator's own message names no key: name its most relevant branch error.
             while error.context:
                 error = min(error.context, key=jsonschema.exceptions.relevance)
-            where = ".".join(str(p) for p in (entity, *error.absolute_path))
+            where = ".".join(str(p) for p in (field, *error.absolute_path))
             lines.append(f"BattINFO {self.version} refuses {where}: {error.message}")
         return lines
 
@@ -184,14 +184,14 @@ def _refs(node: Any) -> Iterator[str]:
 
 
 def _download_battinfo(tag: str, dest: Path, timeout: float) -> None:
-    """Fetch the six entity documents at ``tag`` and every document that their ``$ref`` reach.
+    """Fetch the six schemas in ``FIELD_SCHEMAS`` at ``tag``, and every document that their ``$ref`` reach.
 
     Raises:
         ValueError: If a ``$ref`` is a URL, is absolute, or leaves ``assets/schemas/``.
         TimeoutError: If ``timeout`` seconds pass before the last request.
     """
     deadline = time.monotonic() + timeout
-    pending = list(ENTITY_DOCS.values())
+    pending = list(FIELD_SCHEMAS.values())
     seen = set(pending)
     while pending:
         rel = pending.pop(0)
@@ -281,13 +281,14 @@ def _release_schema(
         return BATTINFO_SCHEMA, True
 
 
-def stated_release(metadata: Metadata) -> str | None:
-    """Return the BattINFO release that ``metadata`` states, directly or by a 0.2.0 ``battinfo_ref``."""
-    return metadata.bdf.battinfo_version or _REF_RELEASES.get(metadata.bdf.battinfo_ref or "")
+def get_stated_release(metadata: Metadata) -> str | None:
+    """Return the BattINFO release in ``metadata.bdf.battinfo_version``, or the release of a bdf 0.2.0 ``battinfo_ref``."""
+    ref = metadata.bdf.__dict__["battinfo_ref"]  # not the attribute, which warns that it is deprecated
+    return metadata.bdf.battinfo_version or _REF_RELEASES.get(ref or "")
 
 
 def _refusals(schema: BattinfoSchema, metadata: Metadata) -> list[str]:
-    return [line for entity in ENTITY_DOCS for line in schema.refusals(entity, getattr(metadata, entity))]
+    return [line for field in FIELD_SCHEMAS for line in schema.check(field, getattr(metadata, field))]
 
 
 def _check_metadata(
@@ -298,7 +299,7 @@ def _check_metadata(
     strict: bool = False,
     stacklevel: int,
 ) -> tuple[list[str], BattinfoSchema | None, bool]:
-    """Return the refusal lines of the six entities, and the set that gave them.
+    """Return the refusal lines of the six ``battinfo_*`` fields, and the set that gave them.
 
     Args:
         metadata: The metadata to check.
@@ -311,15 +312,15 @@ def _check_metadata(
         stacklevel: ``warnings.warn`` stack level, counted from the caller.
 
     Returns:
-        ``([], None, False)`` where no entity holds data; otherwise the lines,
+        ``([], None, False)`` where every ``battinfo_*`` field is empty; otherwise the lines,
         the set they were checked against, and whether that is the bundle in
         place of a stated release. A refused value never raises.
     """
-    if not any(getattr(metadata, entity) for entity in ENTITY_DOCS):
+    if not any(getattr(metadata, field) for field in FIELD_SCHEMAS):
         return [], None, False
     if schema is not None:
         return _refusals(schema, metadata), schema, False
-    stated = stated_release(metadata)
+    stated = get_stated_release(metadata)
     schema, fell_back = _release_schema(stated, where, strict=strict, stacklevel=stacklevel + 1)
     try:
         return _refusals(schema, metadata), schema, fell_back

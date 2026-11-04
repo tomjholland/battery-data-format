@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bdf.battinfo import ENTITY_DOCS
+from bdf.battinfo import FIELD_SCHEMAS
 from bdf.metadata import BdfReadInfo, Metadata
 
 # An epoch with no significance beyond being a value the record accepts.
@@ -18,14 +18,14 @@ _PLACEHOLDER_EPOCH = 1700000000
 
 def test_read_metadata_declares_the_six_entity_records_bdf_raw_and_extras_only() -> None:
     """Metadata's field set is the six BattINFO entity records, bdf, raw, and extras."""
-    assert set(Metadata.model_fields) == {*ENTITY_DOCS, "bdf", "raw", "extras"}
+    assert set(Metadata.model_fields) == {*FIELD_SCHEMAS, "bdf", "raw", "extras"}
 
 
 def test_fresh_read_metadata_holds_an_empty_dict_for_each_entity() -> None:
     """A freshly constructed Metadata carries an empty dict for each entity, and no entity is shared."""
     meta = Metadata()
 
-    assert all(getattr(meta, entity) == {} for entity in ENTITY_DOCS)
+    assert all(getattr(meta, entity) == {} for entity in FIELD_SCHEMAS)
     assert isinstance(meta.bdf, BdfReadInfo)
     assert meta.raw is None
     assert meta.extras is None
@@ -87,3 +87,12 @@ def test_repr_and_str_show_only_filled_fields() -> None:
     assert repr(meta) == f"Metadata(battinfo_test={{'test': {{'started_at': {_PLACEHOLDER_EPOCH}}}}})"
     assert str(meta) == f"battinfo_test={{'test': {{'started_at': {_PLACEHOLDER_EPOCH}}}}}"
     assert repr(Metadata()) == "Metadata()"
+
+
+def test_battinfo_ref_is_deprecated_and_not_saved() -> None:
+    """A 0.2.0 sidecar's battinfo_ref still loads; reading it warns, and to_dict() leaves it out."""
+    info = BdfReadInfo(battinfo_ref="2ea8929074a7430b6e437065686cda881cfc23e7")
+
+    with pytest.deprecated_call():
+        assert info.battinfo_ref == "2ea8929074a7430b6e437065686cda881cfc23e7"
+    assert info.to_dict() == {}

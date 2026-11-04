@@ -7,10 +7,11 @@ field, ``METADATA.battinfo_test.test.conditions["temperature_c"]`` reaches a
 map key, and ``METADATA.extras["rig_bay"]`` is a reference to an ``extras``
 key.
 
-The first segment must name a BattINFO entity (or ``extras``); a wrong name
-raises ``AttributeError``. Any name extends the path below an entity, so a
-misspelled field there is found when the read checks the staged value against
-BattINFO: it raises ``BDFMetadataError``, or warns with ``validate=False``.
+The first segment must name a ``battinfo_*`` field of ``Metadata`` (or
+``extras``); a wrong name raises ``AttributeError``. Any name extends the path
+below that, so a misspelled key there is found when the read checks the staged
+value against BattINFO: it raises ``BDFMetadataError``, or warns with
+``validate=False``.
 There is no target for ``bdf``, which a read stamps itself.
 """
 
@@ -20,7 +21,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from .battinfo import ENTITY_DOCS
+from .battinfo import FIELD_SCHEMAS
 
 
 class MetadataTarget(BaseModel):
@@ -76,7 +77,7 @@ class ExtrasTarget(BaseModel):
 
 
 class _TargetPath:
-    """A path below a BattINFO entity, spelled with attributes and subscripts.
+    """A path below a ``battinfo_*`` field, spelled with attributes and subscripts.
 
     It holds only its path in a private slot, so any field name (``kind``,
     ``path``, ``copy`` among them) extends the path. A rule set turns it into a
@@ -142,26 +143,26 @@ class _ExtrasNamespace:
 
 
 class _MetadataRoot:
-    """The top-level ``METADATA`` namespace: the six entity records, plus ``extras``."""
+    """The top-level ``METADATA`` namespace: the six ``battinfo_*`` fields, plus ``extras``."""
 
     __slots__ = ()
 
     def __getattr__(self, name: str) -> Any:
-        """Resolve ``name`` against the entity records and ``extras``.
+        """Resolve ``name`` against the ``battinfo_*`` fields and ``extras``.
 
         Args:
             name: The attribute segment to resolve.
 
         Returns:
             An :class:`_ExtrasNamespace` for ``"extras"``, otherwise the
-            :class:`_TargetPath` of that entity record.
+            :class:`_TargetPath` of that ``battinfo_*`` field.
 
         Raises:
-            AttributeError: ``name`` names no entity record.
+            AttributeError: ``name`` is not a ``battinfo_*`` field or ``extras``.
         """
         if name == "extras":
             return _ExtrasNamespace()
-        if name in ENTITY_DOCS:
+        if name in FIELD_SCHEMAS:
             return _TargetPath((name,))
         raise AttributeError(f"{name!r} is not a declared BattINFO metadata record")
 

@@ -24,7 +24,7 @@ from bdf import (
     io,
 )
 from bdf._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataWarning
-from bdf.battinfo import ENTITY_DOCS, BattinfoSchema
+from bdf.battinfo import FIELD_SCHEMAS, BattinfoSchema
 from bdf.io import read, scan
 from bdf.metadata_parsers import JsonRule, JsonSidecarParser, RegexRule, TxtPreambleParser
 from bdf.normalization import AbsoluteTimeNormalization
@@ -837,7 +837,7 @@ def test_read_returns_metadata_with_six_entity_dicts(tmp_path: Path) -> None:
     assert isinstance(meta, Metadata)
     assert meta.bdf.source == "bdf_csv"
     # The file was saved with no metadata, so each of the six BattINFO entities is an empty dict.
-    assert [getattr(meta, entity) for entity in ENTITY_DOCS] == [{}] * 6
+    assert [getattr(meta, entity) for entity in FIELD_SCHEMAS] == [{}] * 6
     assert meta.raw is None
     assert meta.extras is None
 

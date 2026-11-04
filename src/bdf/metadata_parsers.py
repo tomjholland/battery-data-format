@@ -611,9 +611,9 @@ class BdfSidecarParser(MetadataParser):
     restores as an ordinary declared field, which keeps a repeated save and
     read from nesting a copy of the sidecar inside itself. A top-level key
     that ``Metadata`` does not declare raises ``BDFMetadataError`` naming
-    that key, and a declared field with a value of the wrong kind (an
-    entity that is not an object) raises the same way. The read, not this
-    parser, checks the entity values against BattINFO. A document claiming
+    that key, and a declared field with a value of the wrong kind (a
+    ``battinfo_*`` field that is not an object) raises the same way. The
+    read, not this parser, checks the ``battinfo_*`` values against BattINFO. A document claiming
     a newer ``bdf_version`` raises with an upgrade instruction (GH #106). A sidecar that exists and cannot be read at all raises
     :class:`BDFMetadataError`, so an empty ``Metadata`` always means that no
     sidecar exists.

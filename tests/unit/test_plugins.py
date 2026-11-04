@@ -16,7 +16,7 @@ from referencing.jsonschema import DRAFT202012
 
 import bdf.battinfo
 from bdf._errors import BDFMetadataWarning
-from bdf.battinfo import ENTITY_DOCS
+from bdf.battinfo import FIELD_SCHEMAS
 from bdf.io import read
 from bdf.plugins import (
     BDF_NORMALIZER,
@@ -510,7 +510,7 @@ def test_every_shipped_rule_target_is_a_schema_path() -> None:
             staged: dict = {}
             target.stage(staged, "x")
             entity, *below = target.path
-            validator = Draft202012Validator(schema.docs[ENTITY_DOCS[entity]], registry=registry)
+            validator = Draft202012Validator(schema.docs[FIELD_SCHEMAS[entity]], registry=registry)
             # Errors inside an anyOf/oneOf sit in error.context, so look at every level.
             for error in _with_context(validator.iter_errors(staged[entity])):
                 where = f"{plugin_id}: {'.'.join(target.path)}: {error.message}"
