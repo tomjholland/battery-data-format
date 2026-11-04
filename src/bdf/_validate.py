@@ -411,6 +411,7 @@ def validate(
     report: bool = False,
     raise_on_error: bool = False,  # <- default False so notebooks don’t crash
     registry_path: str | Path | None = None,
+    ontology: ColumnOntology | None = None,
 ):
     """
     Validate a BDF DataFrame, a local file path, an HTTP/HTTPS URL, or a dataset id.
@@ -419,6 +420,9 @@ def validate(
       - DataFrame: validate as-is (no transformations).
       - Path/URL/id: only treated as a *BDF artifact* (strict). We do NOT vendor-parse
         or normalize here. If it doesn’t look like BDF, you’ll get an 'ok=False' report.
+
+    ``ontology`` defaults to the bundled release for a DataFrame, and to the
+    release that a file's sidecar states for a path.
 
     Returns:
       dict report with at least:
@@ -440,7 +444,7 @@ def validate(
     import pandas as pd
 
     if isinstance(obj, pd.DataFrame):
-        return validate_df(obj, report=report, raise_on_error=raise_on_error)
+        return validate_df(obj, report=report, raise_on_error=raise_on_error, ontology=ontology)
 
     # Resolve path/URL/registry id to a local path
     if isinstance(obj, (str, Path)):
@@ -465,9 +469,9 @@ def validate(
 
         # Try to read the file
         try:
-            from .io import read
+            from .io import _read
 
-            df, _metadata = read(p)
+            df, _metadata, used = _read(p, lazy=False, ontology=ontology)
         except Exception as e:
             return _bad_report(
                 kind="io_error",
@@ -476,7 +480,7 @@ def validate(
             )
 
         # Validate columns/units only; do NOT normalize or modify
-        return validate_df(df, report=report, raise_on_error=raise_on_error)
+        return validate_df(df, report=report, raise_on_error=raise_on_error, ontology=used)
 
     # Anything else: wrong type
     return _bad_report(
