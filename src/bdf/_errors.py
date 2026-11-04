@@ -6,7 +6,7 @@ class BDFValidationError(Exception):
 
 
 class BDFMetadataError(Exception):
-    """Raised when a metadata sidecar exists and cannot be restored."""
+    """Raised when a metadata sidecar exists and cannot be restored, or when the BattINFO check refuses a read or a save."""
 
 
 class BDFDefinitionError(RuntimeError):

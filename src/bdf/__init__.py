@@ -6,19 +6,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataError, BDFValidationError
+    from ._errors import (
+        BDFDefinitionError,
+        BDFDefinitionWarning,
+        BDFMetadataError,
+        BDFMetadataWarning,
+        BDFValidationError,
+    )
     from ._explore import explore
     from ._ingest import ingest
     from ._registry import get_entry, load_registry
     from ._templates import templates
     from ._validate import validate, validate_df
-    from .battinfo.generated.cell_instance_schema import BattinfoCellInstance
-    from .battinfo.generated.channel_schema import BattinfoChannelInstance
-    from .battinfo.generated.equipment_schema import BattinfoEquipmentInstance
-    from .battinfo.generated.test_protocol_schema import BattinfoTestProtocol
-    from .battinfo.generated.test_schema import BattinfoTest
     from .io import read, save, scan
-    from .metadata import BattinfoDataset, BdfReadInfo, Metadata
+    from .metadata import BdfReadInfo, Metadata
     from .metadata_targets import METADATA
     from .normalization import (
         AbsoluteTimeNormalization,
@@ -50,13 +51,7 @@ __all__ = [
     "RelativeTimeNormalization",
     "ElapsedTimeNormalization",
     "DayMonthOrder",
-    # BattINFO record models
-    "BattinfoTest",
-    "BattinfoCellInstance",
-    "BattinfoChannelInstance",
-    "BattinfoEquipmentInstance",
-    "BattinfoTestProtocol",
-    "BattinfoDataset",
+    # read metadata
     "BdfReadInfo",
     "Metadata",
     # where a metadata rule stages its value
@@ -82,6 +77,7 @@ __all__ = [
     # errors
     "BDFValidationError",
     "BDFMetadataError",
+    "BDFMetadataWarning",
     "BDFDefinitionError",
     "BDFDefinitionWarning",
 ]
@@ -97,6 +93,7 @@ _LAZY_ATTRS: dict[str, str] = {
     "validate_df": "._validate",
     "BDFValidationError": "._errors",
     "BDFMetadataError": "._errors",
+    "BDFMetadataWarning": "._errors",
     "BDFDefinitionError": "._errors",
     "BDFDefinitionWarning": "._errors",
     "IdentityNormalization": ".normalization",
@@ -105,12 +102,6 @@ _LAZY_ATTRS: dict[str, str] = {
     "DayMonthOrder": ".normalization",
     "RelativeTimeNormalization": ".normalization",
     "ElapsedTimeNormalization": ".normalization",
-    "BattinfoTest": ".battinfo.generated.test_schema",
-    "BattinfoCellInstance": ".battinfo.generated.cell_instance_schema",
-    "BattinfoChannelInstance": ".battinfo.generated.channel_schema",
-    "BattinfoEquipmentInstance": ".battinfo.generated.equipment_schema",
-    "BattinfoTestProtocol": ".battinfo.generated.test_protocol_schema",
-    "BattinfoDataset": ".metadata",
     "BdfReadInfo": ".metadata",
     "Metadata": ".metadata",
     "METADATA": ".metadata_targets",

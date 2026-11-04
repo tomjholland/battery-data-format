@@ -88,6 +88,9 @@ markers) are generated from it:
   ontology's `obligation` annotations and is pinned by
   `tests/unit/test_spec_ontology_fields.py`; an ontology release that
   changes it must update that test deliberately in the sync PR.
+- The `freshness` marker covers the tests that compare the ontology snapshot
+  against upstream. CI runs them once, in the `freshness-tests` job; run them
+  locally with `uv run --all-extras pytest -m freshness`.
 
 The Supported Plugins page (`docs/plugins.rst`, between `BEGIN/END GENERATED`
 markers) is generated from `bdf.plugins.PLUGINS` by the `docs/_ext/generate_plugins_doc.py`
@@ -98,31 +101,22 @@ build the docs.
 ## BattINFO-derived content (do not edit by hand)
 
 [BattINFO](https://github.com/BIG-MAP/BattINFO) is the source of truth for the
-managed schema files under `src/bdf/data/battinfo/schemas/` (nine today). The model package
-`bdf.battinfo.generated` renders from those files alone, and
-`src/bdf/data/battinfo/VERSION` stamps the upstream commit they came from.
+JSON schema documents under `src/bdf/data/battinfo/`. The bundle is one
+BattINFO release: `VERSION` names the release (for example `0.8.0rc2`), and
+`schemas/` holds the six entity documents and every document that their
+`$ref`s reach (nine for `0.8.0rc2`).
 
 - To change a schema, open a PR on the **BattINFO repo**, not here.
-- A `freshness` test (`test_bundle_matches_the_upstream_default_branch`) fails
-  when the bundle differs from upstream `main`. The comparison reads parsed
-  content, so an upstream commit that reformats one of the managed files, or that
-  leaves `assets/schemas/` alone, keeps it green. Only a real schema change
-  turns it red. Run `python scripts/update_battinfo.py --check` to see the same
-  comparison as a report.
-- The `freshness` marker covers every test that compares bundled content
-  against upstream, here and for the ontology snapshot. Those tests read the
-  repository and never the interpreter, so CI runs them once in the
-  `freshness-tests` job and the version matrix skips them. That job gates the
-  rest of the suite, because a stale bundle invalidates every result the other
-  jobs produce. Run it locally with `uv run --all-extras pytest -m freshness`.
-- To clear a red check, run `python scripts/update_battinfo.py main` and commit
-  the result. The script fetches the managed files, stamps the commit that `main`
-  resolves to, and regenerates the model package. Review that diff: an upstream
-  rename can break a field path that `tests/unit/test_battinfo_contract.py`
-  pins.
-- Never edit `bdf/battinfo/generated/` directly. CI compares the committed
-  package against a fresh render (`datamodel-codegen --check`), and a hand
-  edit fails that check.
+- To move the bundle to another release, run `uv run bdf-update-battinfo VERSION`
+  and commit the result. The command needs a version, because BattINFO
+  publishes only pre-releases and so has no latest release. It fetches the
+  documents at the tag `vVERSION` and writes `VERSION` and `schemas/`. Review
+  the diff: the shipped plugins' metadata rules must still name paths that the
+  release declares, and `tests/unit/test_plugins.py` fails when one does not.
+- A `network` test (`test_a_fetched_bundled_release_is_the_bundle`) fetches the
+  bundled release again and compares it with the bundle byte for byte, so a
+  hand edit or a broken fetch fails CI's `network-tests` job.
+- Never edit the documents under `schemas/` by hand.
 
 ## Reference artifacts are byte-exact
 

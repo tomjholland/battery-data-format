@@ -15,6 +15,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `ColumnOntology.from_version()` and `ColumnOntology.get_snapshot()` raise `BDFDefinitionError`, chained from the cause, where they raised `requests.HTTPError`. `BDFDefinitionError` is a `RuntimeError`.
 - A read uses the ontology release that the file's sidecar states (`bdf.ontology_version`), not always the bundled release. bdf loads that release from the bundle, the cache, or upstream, so a read of a file saved with an older release can make one network request per machine. When the release cannot be loaded, the read uses the bundled release with a `BDFDefinitionWarning`, and later reads in the process do not try it again; the returned metadata keeps the stated release. Otherwise the returned metadata's `bdf.ontology_version` names the release the frame was read with.
 - A save checks the columns against the release that its metadata states, and the sidecar's `bdf.ontology_version` records that release: it is now the release the file was checked against, not the writer's bundled release. A read and then a save keeps the file's release. When that release cannot be loaded, `save()` raises `BDFDefinitionError` and writes nothing; with `validate=False` it checks against the bundled release with a `BDFDefinitionWarning` and the sidecar keeps the stated release. `bdf.bdf_version` still names the writer.
+- The six BattINFO entities of `Metadata` are plain dicts in the shape of their BattINFO schema: write `meta.battinfo_test["test"]["name"]`, not `meta.battinfo_test.test.name`. The classes `BattinfoTest`, `BattinfoCellInstance`, `BattinfoChannelInstance`, `BattinfoEquipmentInstance`, `BattinfoTestProtocol` and `BattinfoDataset` and the package `bdf.battinfo.generated` are removed.
+- An assignment to an entity is not checked, and no value is converted: a string written for a number stays a string, and the check refuses it. `jsonschema` checks the entities against a BattINFO release at read, at save, and in `Metadata.check()`. A partial record is valid.
+- The check does not check `format` (`uri`, `email`, `date`, `date-time`).
+- A read and a save raise `BDFMetadataError` for a value that the BattINFO release refuses. With `validate=False` they warn `BDFMetadataWarning` instead, and the read returns the metadata and the save writes both files. A refused save writes nothing.
+- A save checks the entities against the release that the metadata states in `bdf.battinfo_version` (a bdf 0.2.0 sidecar's `battinfo_ref` names `0.8.0rc2`), else the bundled release, and the sidecar states the release used in `bdf.battinfo_version`, in place of `bdf.battinfo_ref`. A stated release that cannot be loaded or used falls back to the bundled release with a `BDFDefinitionWarning`, and the sidecar states the bundled release.
+- An explicit `null` that bdf 0.2.0 wrote for a field with a factory default (for example `expires_at` set to `None`) is refused by the schema.
+- `jsonschema>=4.23` and `referencing>=0.35` are new dependencies.
+- `bdf-update-battinfo VERSION` replaces `scripts/update_battinfo.py`. It needs a version, because BattINFO publishes no final release.
 
 ### Added
 - `BDFDefinitionError` and `BDFDefinitionWarning`, exported from `bdf`.
@@ -23,6 +31,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `ontology=` on `validate_df`. The required and optional columns, synonyms, and derived-column checks come from that `ColumnOntology`.
 - `ontology=` on `normalize`, and on `TableNormalizer.normalize`, `resolve`, and `from_column_map`. The normalization uses only that `ColumnOntology` for labels, units, dtypes, and required columns. A column that a normalizer maps to a quantity the ontology does not define is handled as a column outside the spec, with a `UserWarning`.
 - `ColumnOntology.from_latest()` falls back to the newest local release that is not a pre-release, with a `BDFDefinitionWarning`, when upstream cannot be asked for its latest release or the release cannot be fetched. It raises `BDFDefinitionError` when no such release exists.
+- BattINFO schema sets loaded at run time: `bdf.battinfo.BATTINFO_SCHEMA` is the bundled release, and `BattinfoSchema.from_version(version)` returns a new set for another release, from the bundle, the cache, or the BattINFO repository. `Metadata.check(schema)` returns one line for each value that a set refuses; with no set it checks against the release that a save would use.
+- `battinfo=` on `save`: the call checks against that `BattinfoSchema` and states its release.
+- The `bdf-update-battinfo VERSION` command, which writes a BattINFO release into the bundle.
+- `BDFMetadataWarning`, exported from `bdf`.
+- The bundled BattINFO schemas are release `0.8.0rc2`: `src/bdf/data/battinfo/VERSION` names it, in place of the BattINFO commit.
 
 
 ## [0.2.0] - 2026-11-03

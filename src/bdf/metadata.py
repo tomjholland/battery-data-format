@@ -4,17 +4,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
-from pydantic import Field
-
-from bdf.battinfo._base import _RecordModel
-from bdf.battinfo.generated.cell_instance_schema import BattinfoCellInstance
-from bdf.battinfo.generated.channel_schema import BattinfoChannelInstance
-from bdf.battinfo.generated.dataset_schema import BattinfoDatasetSchemaOrgAligned
-from bdf.battinfo.generated.equipment_schema import BattinfoEquipmentInstance
-from bdf.battinfo.generated.test_protocol_schema import BattinfoTestProtocol
-from bdf.battinfo.generated.test_schema import BattinfoTest
+from pydantic import BaseModel, ConfigDict, Field
 
 # Optional pandas (only required if you pass a DataFrame)
 try:
@@ -27,9 +19,28 @@ from bdf import spec
 if TYPE_CHECKING:
     from bdf.battinfo import BattinfoSchema
 
-# The generated root class carries the schema title verbatim; the short name
-# is the public one, matching the record field it types.
-BattinfoDataset = BattinfoDatasetSchemaOrgAligned
+
+class _RecordModel(BaseModel):
+    """Shared configuration and serialisation for the read metadata models."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        """Yield only the fields that differ from their default, for ``repr`` and ``str``."""
+        for name, info in type(self).model_fields.items():
+            value = getattr(self, name)
+            if value != info.get_default(call_default_factory=True):
+                yield name, value
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise this record to a plain dict.
+
+        Returns:
+            The model dumped in JSON mode with ``exclude_defaults=True``, so a
+            field left at its default (``None``, or an empty entity dict) is
+            absent from the result.
+        """
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class BdfReadInfo(_RecordModel):
@@ -46,7 +57,10 @@ class BdfReadInfo(_RecordModel):
     """The BDF ontology release the writer's column spec was pinned to."""
     battinfo_ref: str | None = None
     """The upstream BattINFO commit the writer's bundled schemas were fetched
-    at (a release tag once upstream versions its schemas)."""
+    at. bdf 0.2.0 stamped it; a later save states ``battinfo_version`` instead."""
+    battinfo_version: str | None = None
+    """The BattINFO release the entities follow. ``save()`` stamps the release
+    it checked them against; set it to move the metadata to another release."""
 
 
 class Metadata(_RecordModel):
@@ -54,38 +68,29 @@ class Metadata(_RecordModel):
     read audit section, the verbatim source a parser read, and the values a
     rule staged deliberately.
 
-    Each record is the generated root model of one BattINFO entity
-    (:mod:`bdf.battinfo.generated`), and the nesting and property names are
-    BattINFO's own (``meta.battinfo_test.test.instrument_name``, not a
-    flattened facade), so a caller who already speaks BattINFO finds nothing
-    to translate. A plugin fills only the fields it can derive, and every
-    other declared leaf field keeps its default. The saved sidecar serialises
-    this same shape.
-
-    Every record field auto-constructs, so a caller assigns a leaf on a fresh
-    instance with no ``None`` guard. A leaf of a plain scalar type reads as
-    ``None`` while unfilled. A field whose type is a model does not: it
-    defaults to an empty instance of that model, which covers each nested
-    section and the wrapper-typed leaves ``expires_at``, ``manufactured_at``,
-    ``commissioned_at``, and ``Quantity.value``. Read ``.root`` on a wrapper
-    to reach the value it holds.
+    Each entity is a plain dict in the shape of its BattINFO document
+    (``meta.battinfo_test["test"]["instrument_name"]``), so a caller who
+    already speaks BattINFO finds nothing to translate. A dict keeps each value
+    as it was written: nothing checks or converts it on assignment.
+    :meth:`check` names the values that a BattINFO release refuses, and a read
+    or a save runs the same check. The saved sidecar serialises this same shape.
     """
 
     # An upstream schema sets `additionalProperties: false` at its root, so
     # `bdf`, `raw`, and `extras` cannot live inside a record. Each wrapper key
     # joins `battinfo_` to the upstream entity type, which also keeps a
     # sidecar document distinct from a record document.
-    battinfo_test: BattinfoTest = Field(default_factory=BattinfoTest)
+    battinfo_test: dict[str, Any] = Field(default_factory=dict)
     """The test activity that produced this data: who ran it, when it started, and which datasets it links."""
-    battinfo_cell: BattinfoCellInstance = Field(default_factory=BattinfoCellInstance)
+    battinfo_cell: dict[str, Any] = Field(default_factory=dict)
     """The physical cell the test ran on, and the cell type it derives from."""
-    battinfo_channel: BattinfoChannelInstance = Field(default_factory=BattinfoChannelInstance)
+    battinfo_channel: dict[str, Any] = Field(default_factory=dict)
     """The one channel of the equipment unit that ran the test."""
-    battinfo_equipment: BattinfoEquipmentInstance = Field(default_factory=BattinfoEquipmentInstance)
+    battinfo_equipment: dict[str, Any] = Field(default_factory=dict)
     """The physical equipment unit that ran the test, a named cycler for example."""
-    battinfo_test_protocol: BattinfoTestProtocol = Field(default_factory=BattinfoTestProtocol)
+    battinfo_test_protocol: dict[str, Any] = Field(default_factory=dict)
     """The reusable protocol the test followed: its typed steps, and links to the files that state them."""
-    battinfo_dataset: BattinfoDataset = Field(default_factory=BattinfoDataset)
+    battinfo_dataset: dict[str, Any] = Field(default_factory=dict)
     """The dataset this file belongs to: its distributions (raw and processed files,
     checksums, formats), identifiers, and links to the cell and test that produced it.
     Mirrors a pre-1.0 upstream schema and may evolve with it. Nothing fills this
@@ -119,8 +124,14 @@ class Metadata(_RecordModel):
 
         Returns:
             The lines, or ``[]``. A refused value never raises.
+
+        Warns:
+            BDFDefinitionWarning: Without ``schema``, when the stated release
+                cannot be used and the bundle is checked instead.
         """
-        raise NotImplementedError
+        from bdf.battinfo import _check_metadata
+
+        return _check_metadata(self, "the metadata", schema=schema, stacklevel=2)[0]
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

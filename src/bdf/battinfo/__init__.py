@@ -1,18 +1,33 @@
-"""BattINFO record models.
+"""BattINFO schema sets: the documents of one release, and the check of metadata against them.
 
-The record models are generated from the bundled upstream schemas
-(:mod:`bdf.battinfo.generated`). The runtime schema set checks entity dicts
-against a BattINFO release.
+A release is a directory with a ``VERSION`` file and the JSON Schema
+documents under ``schemas/``. bdf bundles one release (:data:`BATTINFO_SCHEMA`)
+and loads others through :data:`BATTINFO_SOURCE`, from the cache or from the
+BattINFO repository. A set never changes after it is built, and each way to
+load a release returns a new set.
 """
 
 from __future__ import annotations
 
 import importlib.resources
-from collections.abc import Mapping
+import json
+import posixpath
+import re
+import time
+import warnings
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
+
+import jsonschema
+import referencing.exceptions
+import requests
+from referencing import Registry
+from referencing.jsonschema import DRAFT202012
 
 from bdf._definitions import DefinitionSource
+from bdf._errors import BDFDefinitionError, BDFDefinitionWarning
 
 if TYPE_CHECKING:
     from bdf.metadata import Metadata
@@ -34,9 +49,23 @@ _REF_RELEASES: dict[str, str] = {"2ea8929074a7430b6e437065686cda881cfc23e7": "0.
 READ_FETCH_TIMEOUT = 5.0
 """Seconds that a sidecar read gives the fetch of the release it states."""
 
+_RAW_URL = "https://raw.githubusercontent.com/BIG-MAP/BattINFO/{tag}/assets/schemas/{path}"
+
+
+def _required(
+    validator: Any, required: Any, instance: Any, schema: Mapping[str, Any]
+) -> Iterator[jsonschema.ValidationError]:
+    """Check ``required`` except where it lists the fields of a record, so a partial record is valid."""
+    if "properties" in schema:
+        return
+    yield from jsonschema.Draft202012Validator.VALIDATORS["required"](validator, required, instance, schema)
+
+
+_Validator = jsonschema.validators.extend(jsonschema.Draft202012Validator, {"required": _required})
+
 
 class BattinfoSchema:
-    """A set of BattINFO schema documents of one release. It never changes after it is built."""
+    """The schema documents of one BattINFO release. A set never changes after it is built."""
 
     version: str
     docs: dict[str, dict[str, Any]]
@@ -51,7 +80,20 @@ class BattinfoSchema:
         Raises:
             ValueError: If a document has no string ``$id``.
         """
-        raise NotImplementedError
+        self.version = version
+        self.docs = dict(docs)
+        # Without $schema, a $ref into another document keeps _Validator.
+        self._contents = {path: {k: v for k, v in doc.items() if k != "$schema"} for path, doc in self.docs.items()}
+        for path, doc in self._contents.items():
+            if not isinstance(doc.get("$id"), str):
+                raise ValueError(f"BattINFO document {path} has no string $id")
+        self._registry: Registry = Registry().with_resources(
+            (doc["$id"], DRAFT202012.create_resource(doc)) for doc in self._contents.values()
+        )
+        self._validators: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        return f"BattinfoSchema({self.version!r})"
 
     @classmethod
     def build(cls) -> BattinfoSchema:
@@ -60,7 +102,13 @@ class BattinfoSchema:
         Raises:
             BDFDefinitionError: If the bundled release is missing or unreadable.
         """
-        raise NotImplementedError
+        try:
+            return BATTINFO_SOURCE.get(BATTINFO_SOURCE.get_bundled_version() or "", fetch=False)
+        except BDFDefinitionError as exc:
+            raise BDFDefinitionError(
+                f"The bundled BattINFO release at {BATTINFO_SOURCE.bundled} is missing or unreadable: {exc}. "
+                "Restore it from git or reinstall bdf; bdf-update-battinfo VERSION writes a release into it."
+            ) from exc
 
     @classmethod
     def from_version(cls, version: str, *, refresh: bool = False) -> BattinfoSchema:
@@ -73,7 +121,7 @@ class BattinfoSchema:
         Raises:
             BDFDefinitionError: If the release cannot be loaded.
         """
-        raise NotImplementedError
+        return BATTINFO_SOURCE.get(version, refresh=refresh)
 
     def refusals(self, entity: str, data: Mapping[str, Any]) -> list[str]:
         """Return one line for each value of ``data`` that the entity's document refuses.
@@ -85,23 +133,95 @@ class BattinfoSchema:
         Raises:
             KeyError: If ``entity`` is not in ``ENTITY_DOCS``.
             BDFDefinitionError: If ``data`` is not empty and the set has no document for ``entity``.
+            referencing.exceptions.Unresolvable: If a ``$ref`` names no document.
+            re.error: If a ``pattern`` does not compile.
+            RecursionError: If references loop.
         """
-        raise NotImplementedError
+        path = ENTITY_DOCS[entity]
+        if not data:
+            return []
+        validator = self._validators.get(entity)
+        if validator is None:
+            if path not in self._contents:
+                raise BDFDefinitionError(f"BattINFO {self.version} has no document {path} for {entity}")
+            validator = self._validators[entity] = _Validator(self._contents[path], registry=self._registry)
+        lines = []
+        for error in sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path)):
+            # A combinator's own message names no key: name its most relevant branch error.
+            while error.context:
+                error = min(error.context, key=jsonschema.exceptions.relevance)
+            where = ".".join(str(p) for p in (entity, *error.absolute_path))
+            lines.append(f"BattINFO {self.version} refuses {where}: {error.message}")
+        return lines
 
 
 def _open_battinfo(path: Path) -> BattinfoSchema:
-    """Open a release directory: the ``source``'s open hook."""
-    raise NotImplementedError
+    """Open a release directory: the source's open hook.
+
+    Raises:
+        jsonschema.exceptions.SchemaError: If a document breaks the Draft 2020-12 metaschema.
+    """
+    root = path / "schemas"
+    docs = {
+        p.relative_to(root).as_posix(): json.loads(p.read_text(encoding="utf-8")) for p in root.rglob("*.schema.json")
+    }
+    for doc in docs.values():
+        _Validator.check_schema(doc)
+    return BattinfoSchema(docs, (path / "VERSION").read_text(encoding="utf-8").strip())
+
+
+def _refs(node: Any) -> Iterator[str]:
+    """Yield every ``$ref`` string in a document."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str):
+                yield value
+            else:
+                yield from _refs(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _refs(item)
 
 
 def _download_battinfo(tag: str, dest: Path, timeout: float) -> None:
-    """Fetch the six entity documents at ``tag`` and every document that their ``$ref`` reach."""
-    raise NotImplementedError
+    """Fetch the six entity documents at ``tag`` and every document that their ``$ref`` reach.
+
+    Raises:
+        ValueError: If a ``$ref`` is a URL, is absolute, or leaves ``assets/schemas/``.
+        TimeoutError: If ``timeout`` seconds pass before the last request.
+    """
+    deadline = time.monotonic() + timeout
+    pending = list(ENTITY_DOCS.values())
+    seen = set(pending)
+    while pending:
+        rel = pending.pop(0)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError(f"BattINFO {tag} did not arrive within {timeout} s")
+        response = requests.get(_RAW_URL.format(tag=tag, path=rel), timeout=left)
+        response.raise_for_status()
+        doc = json.loads(response.content)
+        out = dest / "schemas" / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+        for ref in _refs(doc):
+            target = ref.partition("#")[0]
+            if not target:
+                continue
+            joined = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target))
+            if urlsplit(target).scheme or target.startswith("/") or joined.startswith(".."):
+                raise ValueError(f"{rel} refers to {ref!r}, outside the release's schemas")
+            if joined not in seen:
+                seen.add(joined)
+                pending.append(joined)
 
 
 def _no_latest_battinfo(timeout: float) -> str:
     """Raise: BattINFO publishes no final release, so it has no latest release."""
-    raise NotImplementedError
+    raise BDFDefinitionError(
+        "BattINFO publishes no final release, so there is no latest release; "
+        "name a version, for example bdf-update-battinfo 0.8.0rc2"
+    )
 
 
 BATTINFO_SOURCE: DefinitionSource[BattinfoSchema] = DefinitionSource(
@@ -113,46 +233,76 @@ BATTINFO_SOURCE: DefinitionSource[BattinfoSchema] = DefinitionSource(
     open=_open_battinfo,
 )
 
-# The bundled release.
-BATTINFO_SCHEMA: BattinfoSchema = BattinfoSchema.__new__(BattinfoSchema)
+BATTINFO_SCHEMA: BattinfoSchema = BattinfoSchema.build()
+"""The bundled release. Nothing in bdf rebinds or changes it after import."""
+
+# The errors of a set that loads but cannot be used for the check.
+_UNUSABLE = (referencing.exceptions.Unresolvable, re.error, RecursionError, BDFDefinitionError)
+
+
+def _warn_fall_back(stated: str, where: str | Path, reason: object, stacklevel: int) -> None:
+    warnings.warn(
+        f"Could not use BattINFO release {stated} that {where}'s metadata states: {reason}. "
+        f"Checking against the bundled release {BATTINFO_SCHEMA.version}.",
+        BDFDefinitionWarning,
+        stacklevel=stacklevel + 1,
+    )
 
 
 def _release_schema(stated: str | None, where: str | Path, *, stacklevel: int) -> BattinfoSchema:
-    """Return the schema set for the release that metadata states, or the bundle."""
-    raise NotImplementedError
+    """Return the schema set for the release that metadata states, or the bundle.
+
+    A stated release that cannot be named or loaded gives the bundle, with a
+    ``BDFDefinitionWarning``. ``stacklevel`` counts from this function's caller.
+    """
+    if not stated:
+        return BATTINFO_SCHEMA
+    try:
+        name = BATTINFO_SOURCE.normalise(stated)
+        if name == BATTINFO_SOURCE.normalise(BATTINFO_SCHEMA.version):
+            return BATTINFO_SCHEMA
+        return BATTINFO_SOURCE.get(name, timeout=READ_FETCH_TIMEOUT)
+    except BDFDefinitionError as exc:
+        _warn_fall_back(stated, where, exc, stacklevel + 1)
+        return BATTINFO_SCHEMA
+
+
+def _refusals(schema: BattinfoSchema, metadata: Metadata) -> list[str]:
+    return [line for entity in ENTITY_DOCS for line in schema.refusals(entity, getattr(metadata, entity))]
 
 
 def _check_metadata(
     metadata: Metadata, where: str | Path, *, schema: BattinfoSchema | None = None, stacklevel: int
 ) -> tuple[list[str], BattinfoSchema | None]:
-    """Return the refusal lines of the six entities, and the set that gave them."""
-    raise NotImplementedError
+    """Return the refusal lines of the six entities, and the set that gave them.
+
+    Args:
+        metadata: The metadata to check.
+        where: The file or object the metadata belongs to, for a warning.
+        schema: The set to check against. Without it: the release that the
+            metadata states, else the bundle, falling back to the bundle with a
+            ``BDFDefinitionWarning`` where the stated release cannot be used.
+        stacklevel: ``warnings.warn`` stack level, counted from the caller.
+
+    Returns:
+        ``([], None)`` where no entity holds data; otherwise the lines and the
+        set they were checked against. A refused value never raises.
+    """
+    if not any(getattr(metadata, entity) for entity in ENTITY_DOCS):
+        return [], None
+    if schema is not None:
+        return _refusals(schema, metadata), schema
+    stated = metadata.bdf.battinfo_version or _REF_RELEASES.get(metadata.bdf.battinfo_ref or "")
+    schema = _release_schema(stated, where, stacklevel=stacklevel + 1)
+    try:
+        return _refusals(schema, metadata), schema
+    except _UNUSABLE as exc:
+        if schema is BATTINFO_SCHEMA:
+            raise
+        _warn_fall_back(str(stated), where, exc, stacklevel + 1)
+        return _refusals(BATTINFO_SCHEMA, metadata), BATTINFO_SCHEMA
 
 
 def _update_snapshot_cli() -> None:
-    """Run ``bdf-update-battinfo [VERSION]``."""
-    raise NotImplementedError
-
-
-def bundled_ref() -> str | None:
-    """Return the upstream BattINFO commit the bundled schemas were fetched at.
-
-    Reads the ``ref`` line of ``bdf/data/battinfo/VERSION``. Upstream publishes
-    no schema version numbers yet, so the ref is a commit hash; when BattINFO
-    starts cutting versioned schema releases, this becomes a release tag.
-
-    Returns:
-        The ref string, or None when the stamp is missing or unreadable.
-    """
-    import importlib.resources
-
-    try:
-        text = (
-            importlib.resources.files("bdf.data").joinpath("battinfo").joinpath("VERSION").read_text(encoding="utf-8")
-        )
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line.startswith("ref="):
-            return line.removeprefix("ref=").strip() or None
-    return None
+    """Run ``bdf-update-battinfo VERSION``, which writes a release into the bundle."""
+    BATTINFO_SOURCE.run_cli("bdf-update-battinfo")

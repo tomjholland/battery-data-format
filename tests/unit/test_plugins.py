@@ -38,8 +38,7 @@ from bdf.spec import COLUMN_ONTOLOGY
 from bdf.table_normalizers import NORMALIZERS, Syn, TableNormalizer
 from bdf.table_parsers import DelimTxtParser
 
-not_implemented = pytest.mark.xfail(strict=True, reason="BattINFO runtime schema not implemented")
-
+# The real cycler files in tests/data whose plugins make BattINFO metadata.
 CYCLER_FIXTURES = [path for folder in ("mpr", "nda", "res") for path in sorted((DATA / folder).iterdir())]
 
 
@@ -222,7 +221,6 @@ class TestMaccorPreamble:
             ("23-Jan-20 10:31:41", 1579775501),
         ],
     )
-    @not_implemented
     def test_maccor_preamble_reads_every_declared_header_shape(
         self, tmp_path: Path, header: str, expected: int
     ) -> None:
@@ -495,9 +493,10 @@ def _with_context(errors):
         yield from _with_context(error.context or ())
 
 
-@not_implemented
 def test_every_shipped_rule_target_is_a_schema_path() -> None:
     """A value staged at a shipped target is never an unknown key, and its path never goes below a non-object."""
+    # A plain Draft 2020-12 validator over the bundled release, so "required" counts here: this test
+    # asks whether each target is a place in the schema, not whether a partial record is accepted.
     schema = bdf.battinfo.BATTINFO_SCHEMA
     registry = Registry().with_resources(
         (doc["$id"], DRAFT202012.create_resource({k: v for k, v in doc.items() if k != "$schema"}))
@@ -507,13 +506,19 @@ def test_every_shipped_rule_target_is_a_schema_path() -> None:
         for target, _rule in plugin.metadata_parser.rules:
             if target.kind != "metadata":
                 continue
+            # Stage a dummy value at the target, as the plugin would, and check the entity it lands in.
             staged: dict = {}
             target.stage(staged, "x")
             entity, *below = target.path
             validator = Draft202012Validator(schema.docs[ENTITY_DOCS[entity]], registry=registry)
+            # Errors inside an anyOf/oneOf sit in error.context, so look at every level.
             for error in _with_context(validator.iter_errors(staged[entity])):
                 where = f"{plugin_id}: {'.'.join(target.path)}: {error.message}"
+                # The target's name is not a key the schema allows at that place.
                 assert error.validator != "additionalProperties", where
+                # A type error on a level above the target's last segment means the path goes through
+                # a value that is not an object, such as a field below a string. A "type" error at
+                # the target itself is expected: "x" is a dummy, not the right type.
                 above = list(error.absolute_path)
                 assert not (error.validator == "type" and above == below[: len(above)] and len(above) < len(below)), (
                     where

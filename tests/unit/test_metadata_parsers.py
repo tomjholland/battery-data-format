@@ -22,8 +22,6 @@ from bdf.metadata_parsers import (
 )
 from bdf.normalization import _ARBIN_DT_FMTS, _LANDT_DT_FMTS, _MACCOR_DT_FMTS, AbsoluteTimeNormalization
 
-not_implemented = pytest.mark.xfail(strict=True, reason="BattINFO runtime schema not implemented")
-
 START_TIME_RX = re.compile(r"~Start of Test:\s*(.+)")
 
 # An epoch with no significance beyond being a value; the round-trip check
@@ -31,7 +29,6 @@ START_TIME_RX = re.compile(r"~Start of Test:\s*(.+)")
 _PLACEHOLDER_EPOCH = 1700000000
 
 
-@not_implemented
 def test_nested_source_path_extracts(tmp_path: Path) -> None:
     """A sidecar rule mapping a target to a nested source path stages the value there."""
     from bdf.metadata_targets import METADATA
@@ -46,7 +43,6 @@ def test_nested_source_path_extracts(tmp_path: Path) -> None:
     assert meta.battinfo_test["test"]["started_at"] == _PLACEHOLDER_EPOCH
 
 
-@not_implemented
 def test_preamble_rule_owns_its_interpretation(tmp_path: Path) -> None:
     """A preamble rule's own datetime normalization converts the matched text, not the parser."""
     from bdf.metadata_targets import METADATA
@@ -184,14 +180,16 @@ def test_rules_built_with_metadata_targets_survive_their_json_form() -> None:
     """The targets of a rule set are ``MetadataTarget`` values, and the JSON form restores the same rule set."""
     from bdf.metadata_targets import METADATA, MetadataTarget
 
+    # One target below an entity, and one subscripted target in extras.
     rule = JsonRule(candidates=(("start",),))
     parser = JsonSidecarParser(rules={METADATA.battinfo_test.test.started_at: rule, METADATA.extras["note"]: rule})
 
+    # The attribute chain builds the same value as spelling the path out...
     assert MetadataTarget(path=("battinfo_test", "test", "started_at")) in [target for target, _ in parser.rules]
+    # ...and a plugin's rules can be saved as JSON and loaded again with nothing changed.
     assert JsonSidecarParser.model_validate_json(parser.model_dump_json()) == parser
 
 
-@not_implemented
 def test_a_misspelled_field_below_an_entity_fails_the_read(tmp_path: Path) -> None:
     """The target spells any field; the read's check names the path and the unknown key."""
     from bdf.io import read
@@ -203,9 +201,12 @@ def test_a_misspelled_field_below_an_entity_fails_the_read(tmp_path: Path) -> No
     data = tmp_path / "cell.csv"
     data.write_text("Test Time / s,Voltage / V,Current / A\n0,3.7,0.1\n")
     (tmp_path / "cell.json").write_text(json.dumps({"name": "cell-1"}))
+    # Below an entity, a target accepts any name, because the fields come from the BattINFO release
+    # at run time. So the misspelled "nmae" builds a parser with no error...
     parser = JsonSidecarParser(rules={METADATA.battinfo_test.test.nmae: JsonRule(candidates=(("name",),))})
     plugin = Plugin(table_parser=DelimTxtParser(normalizer=TableNormalizer()), metadata_parser=parser)
 
+    # ...and the read's BattINFO check is where it is caught, naming the object and the unknown key.
     with pytest.raises(BDFMetadataError) as info:
         read(data, plugin=plugin)
 
@@ -213,7 +214,6 @@ def test_a_misspelled_field_below_an_entity_fails_the_read(tmp_path: Path) -> No
     assert "'nmae'" in str(info.value)
 
 
-@not_implemented
 def test_cell_naming_and_conditions_targets_construct(tmp_path: Path) -> None:
     """A cell-naming target and a subscripted open-map target both construct a parser."""
     from bdf.metadata_targets import METADATA
@@ -234,7 +234,6 @@ def test_cell_naming_and_conditions_targets_construct(tmp_path: Path) -> None:
     assert meta.battinfo_test["test"]["conditions"]["temperature_c"] == {"value": 25, "unit_text": "degC"}
 
 
-@not_implemented
 def test_a_wrong_typed_sidecar_value_is_kept_and_the_check_names_it(tmp_path: Path) -> None:
     """A parser stages the value as it is; ``check()`` refuses it by its path."""
     from bdf.metadata_targets import METADATA
@@ -247,11 +246,12 @@ def test_a_wrong_typed_sidecar_value_is_kept_and_the_check_names_it(tmp_path: Pa
     parser = JsonSidecarParser(rules={METADATA.battinfo_test.test.instrument_name: rule})
     meta = parser.parse(data)
 
+    # A number where the schema wants a string: the parser neither converts nor drops it...
     assert meta.battinfo_test == {"test": {"instrument_name": 400}}
+    # ...and check() reports it by its path.
     assert any("battinfo_test.test.instrument_name" in line for line in meta.check())
 
 
-@not_implemented
 def test_unmapped_and_losing_synonym_keys_survive_in_raw(tmp_path: Path) -> None:
     """An unmapped key and a losing synonym key both survive in raw, and extras stays unset."""
     from bdf.metadata_targets import METADATA
@@ -294,7 +294,6 @@ def test_explicit_extras_rule_stages_and_raw_still_carries_everything(tmp_path: 
     }
 
 
-@not_implemented
 def test_naive_preamble_timestamp_is_localised(tmp_path: Path) -> None:
     """A naive preamble timestamp localises to the timezone parse() is called with."""
     from bdf.metadata_targets import METADATA
@@ -309,7 +308,6 @@ def test_naive_preamble_timestamp_is_localised(tmp_path: Path) -> None:
     assert meta.battinfo_test["test"]["started_at"] == pytest.approx(expected, abs=1e-6)
 
 
-@not_implemented
 def test_offset_bearing_preamble_timestamp_is_left_alone(tmp_path: Path) -> None:
     """A preamble timestamp carrying an explicit offset honours that offset over tz."""
     from bdf.metadata_targets import METADATA
@@ -324,7 +322,6 @@ def test_offset_bearing_preamble_timestamp_is_left_alone(tmp_path: Path) -> None
     assert meta.battinfo_test["test"]["started_at"] == pytest.approx(expected, abs=1e-6)
 
 
-@not_implemented
 def test_localised_month_name_parses(tmp_path: Path) -> None:
     """A preamble stating a localised month name stages under the declared format."""
     from bdf.metadata_targets import METADATA
@@ -339,7 +336,6 @@ def test_localised_month_name_parses(tmp_path: Path) -> None:
     assert meta.battinfo_test["test"]["started_at"] == pytest.approx(expected, abs=1e-6)
 
 
-@not_implemented
 def test_naive_timestamp_without_explicit_timezone_warns(tmp_path: Path) -> None:
     """A naive preamble match with no tz supplied warns once and reads as UTC."""
     from bdf.metadata_targets import METADATA
@@ -358,7 +354,6 @@ def test_naive_timestamp_without_explicit_timezone_warns(tmp_path: Path) -> None
     assert meta.battinfo_test["test"]["started_at"] == pytest.approx(expected, abs=1e-6)
 
 
-@not_implemented
 def test_epoch_number_is_not_exempt_and_empty_declaration_stages(tmp_path: Path) -> None:
     """An integer datetime value fails naming the value, and an empty tuple reads ISO text."""
     from bdf.metadata_targets import METADATA
@@ -412,7 +407,6 @@ def test_declared_vendor_tuple_gets_no_tail(tmp_path: Path) -> None:
         parser.parse(p)
 
 
-@not_implemented
 def test_unparseable_timestamp_omits_or_fails(tmp_path: Path) -> None:
     """A blank preamble value omits the field; a date-shaped unparseable one fails the read."""
     from bdf.metadata_targets import METADATA
@@ -437,7 +431,6 @@ def test_unparseable_timestamp_omits_or_fails(tmp_path: Path) -> None:
     assert "%Y-%m-%d" in message
 
 
-@not_implemented
 def test_one_text_two_paths_one_epoch(tmp_path: Path) -> None:
     """The same timestamp text stages the same epoch through a table column and a metadata rule."""
     from bdf.metadata_targets import METADATA

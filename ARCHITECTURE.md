@@ -40,13 +40,23 @@ this page is the map for contributors.
 
 ## Metadata
 
-Metadata follows the same shape as the table pipeline. BattINFO JSON schemas
-(bundled under `src/bdf/data/battinfo/`, refreshed from upstream by
-`scripts/update_battinfo.py`) generate pydantic models. `read()` returns a
-typed `Metadata` object assembled from exactly one source: the artifact's
+Metadata follows the same shape as the table pipeline. `read()` returns a
+`Metadata` object assembled from exactly one source: the artifact's
 `.metadata.json` sidecar when present, the vendor file's own metadata
-otherwise. `save()` writes the sidecar and refuses ambiguous overwrites, so a
-sidecar always describes the last save.
+otherwise. Each BattINFO entity in it is a plain dict in the shape of its
+BattINFO JSON schema. `save()` writes the sidecar and refuses ambiguous
+overwrites, so a sidecar always describes the last save.
+
+BattINFO releases are definition data, as ontology releases are, and
+`bdf.battinfo` loads them through the same `DefinitionSource`. A release is a
+directory with a `VERSION` file and the JSON schema documents under
+`schemas/`. bdf bundles one release in `src/bdf/data/battinfo/`
+(`BATTINFO_SCHEMA`) and loads others from the cache or from the BattINFO
+repository (`BattinfoSchema.from_version`). `jsonschema` checks the entities
+against a release: a read and a save raise for a refused value, or warn with
+`validate=False`, and `Metadata.check()` returns the same lines. A partial
+record is valid, because the check ignores the `required` list of a record.
+`bdf-update-battinfo VERSION` writes a release into the bundle.
 
 ## Design rules that shape everything
 
