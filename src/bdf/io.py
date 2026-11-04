@@ -79,7 +79,7 @@ def _assemble_metadata(
         metadata.bdf.source = source
         metadata.bdf.created_with = bdf.__version__
 
-    lines, schema = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel)
+    lines, schema = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel + 1)
     if schema is not None:
         metadata.bdf.battinfo_version = schema.version
     if lines:

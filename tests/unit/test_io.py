@@ -1746,6 +1746,7 @@ def test_many_sidecars_at_an_unreachable_release_each_fall_back(
 def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Offline, with "legacy_field", which only 0.7.0 allows.
     _unreachable_github(monkeypatch)
     bundled = bdf.battinfo.BATTINFO_SCHEMA.version
     p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
@@ -1753,6 +1754,10 @@ def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
     meta, caught = _read_recording(p, validate=False)
 
     _assert_fell_back(meta, caught, "0.7.0", bundled)
+    # The warning points at the caller's line (this file), not at a line inside bdf.
+    (fallback,) = [w for w in caught if w.category is BDFDefinitionWarning]
+    assert fallback.filename == __file__
+    # The bundle did the check: it refuses "legacy_field", and the refusal names the bundled release.
     (refusal,) = [str(w.message) for w in caught if w.category is BDFMetadataWarning]
     assert f"BattINFO {bundled} refuses battinfo_test.test:" in refusal
 
