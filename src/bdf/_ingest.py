@@ -203,10 +203,11 @@ def ingest(
     - cell_metadata_dir: base dir for per-cell metadata folders (relative to out_dir)
     - validate_existing: validate files that already look like BDF
     - validate_converted: validate after conversion
-    - battinfo: BattINFO release for every read and save, instead of the release each file states.
+    - battinfo: BattINFO schema for every read and save, instead of the BattINFO
+      schema in each sidecar's bdf.battinfo_version.
     - ontology: ontology for every read, save and validation; by default each
-      existing BDF file uses the release its sidecar states, and a converted file
-      uses the bundled release
+      existing BDF file uses the ontology in its sidecar's
+      bdf.ontology_version, and a converted file uses the bundled ontology
     - plugin: force a specific plugin id for raw files
     - incremental: skip previously processed files when unchanged
     - force: reprocess even if a file looks unchanged

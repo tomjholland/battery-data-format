@@ -272,7 +272,7 @@ def test_save_legacy_warns(tmp_path: Path):
     with pytest.warns(UserWarning, match="Legacy BDF column labels detected"):
         io.save(df, path)
     with pytest.warns(UserWarning, match="Legacy BDF column labels detected"):
-        io.save(df, path, validate=False)
+        io.save(df, path, strict=False)
 
 
 def test_save_missing_col_warns(tmp_path: Path):
@@ -286,7 +286,7 @@ def test_save_missing_col_warns(tmp_path: Path):
     with pytest.raises(BDFValidationError):
         io.save(df, path)
     with pytest.warns(UserWarning, match="Missing required BDF columns: \['Test Time / s'\]"):
-        io.save(df, path, validate=False)
+        io.save(df, path, strict=False)
 
 
 def test_save_extra_col_warns(tmp_path: Path):
@@ -302,7 +302,7 @@ def test_save_extra_col_warns(tmp_path: Path):
     with pytest.warns(UserWarning, match="Non-BDF columns present"):
         io.save(df, path)
     with pytest.warns(UserWarning, match="Non-BDF columns present"):
-        io.save(df, path, validate=False)
+        io.save(df, path, strict=False)
 
 
 def test_save_non_canonical_units_warns(tmp_path: Path):
@@ -465,12 +465,13 @@ def test_read_plugin_invalid_type_raises(tmp_path: Path) -> None:
 
 
 def test_read_forwards_all_read_kwargs_to_table_parser(read_mocks: SimpleNamespace, tmp_path: Path) -> None:
-    """read() forwards path + the five read-shaping kwargs verbatim, plus lazy=False."""
+    """read() forwards path + the six read-shaping kwargs verbatim, plus lazy=False."""
     p = tmp_path / "f.csv"
     read(
         p,
         plugin=read_mocks.plugin,
         validate=False,
+        strict=False,
         normalize=False,
         include_unknown=True,
         tz="America/New_York",
@@ -478,6 +479,7 @@ def test_read_forwards_all_read_kwargs_to_table_parser(read_mocks: SimpleNamespa
     read_mocks.table_read.assert_called_once_with(
         p,
         validate=False,
+        strict=False,
         normalize=False,
         include_unknown=True,
         lazy=False,
@@ -502,6 +504,7 @@ def test_scan_forwards_all_read_kwargs_to_table_parser(read_mocks: SimpleNamespa
         p,
         normalize=False,
         validate=False,
+        strict=True,
         include_unknown=False,
         lazy=True,
         tz="America/New_York",
@@ -759,7 +762,7 @@ def test_read_mismatch_raises_by_default(tmp_path: Path) -> None:
 def test_read_mismatch_warns_when_validate_false(tmp_path: Path) -> None:
     path = _write_bdf_csv_with_ms_test_time(tmp_path)
     with pytest.warns(UserWarning, match="appear to be milliseconds"):
-        df, meta = read(path, validate=False)
+        df, meta = read(path, strict=False)
     # values loaded as-is, nothing repaired or recorded
     assert df["Test Time / s"].to_list()[1] == 10_000.0
     assert meta.bdf.time_reconciliation is None  # type: ignore[attr-defined]
@@ -818,7 +821,7 @@ def test_read_unexplained_ratio_stays_loud_even_with_reconcile_time(tmp_path: Pa
     with pytest.raises(BDFValidationError, match="matches no known unit"):
         read(path, reconcile_time=True)
     with pytest.warns(UserWarning, match="matches no known unit"):
-        out, meta = read(path, validate=False)
+        out, meta = read(path, strict=False)
     assert out["Test Time / s"].to_list()[1] == 370.0
     assert meta.bdf.time_reconciliation is None  # type: ignore[attr-defined]
 
@@ -1497,9 +1500,9 @@ def test_a_refused_save_without_validation_warns_and_writes_both_files(tmp_path:
     p = tmp_path / "data.bdf.csv"
     refused = _meta({"test": {"started_at": "yesterday", "nmae": "x"}})
 
-    # validate=False turns the refusal into a warning, as it does for missing required columns.
+    # strict=False turns the refusal into a warning, as it does for missing required columns.
     with pytest.warns(BDFMetadataWarning) as caught:
-        io.save(_FRAME, p, metadata=refused, validate=False)
+        io.save(_FRAME, p, metadata=refused, strict=False)
 
     # One warning lists both faults.
     (message,) = [str(w.message) for w in caught if w.category is BDFMetadataWarning]
@@ -1541,7 +1544,7 @@ def test_a_re_save_checks_against_the_release_it_states_and_keeps_its_stamp(tmp_
 
 
 @uses_cache
-def test_a_stated_release_that_cannot_be_loaded_raises_at_save_unless_validate_is_false(
+def test_a_stated_schema_that_cannot_be_loaded_raises_at_save_unless_strict_is_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 0.7.0 is not bundled or cached, and the fetch fails.
@@ -1550,18 +1553,20 @@ def test_a_stated_release_that_cannot_be_loaded_raises_at_save_unless_validate_i
     accepted = _meta({"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
     refused = _meta({"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
 
-    # With validate on, a save needs the stated release: it raises, says how to get past it, and writes nothing.
+    # With strict on, a save needs the stated schema: it raises, says how to get past it, and writes nothing.
     with pytest.raises(BDFDefinitionError, match="pass battinfo="):
         io.save(_FRAME, tmp_path / "a.bdf.csv", metadata=accepted)
     assert list(tmp_path.glob("a.bdf*")) == []
-    # With validate off, it warns, checks against the bundle instead...
-    with pytest.warns(BDFDefinitionWarning, match=bundled):
-        io.save(_FRAME, tmp_path / "a.bdf.csv", metadata=accepted, validate=False)
-    # ...and keeps the stated release in the sidecar, so the file's claim is not lost.
-    assert _stamp(tmp_path / "a.bdf.csv") == "0.7.0"
-    # The bundle really does the check: it refuses "legacy_field", as a warning because validate is off.
-    with pytest.warns(BDFMetadataWarning):
-        io.save(_FRAME, tmp_path / "c.bdf.csv", metadata=refused, validate=False)
+    # With strict off, it warns that the metadata is not checked, and writes both files...
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        io.save(_FRAME, tmp_path / "c.bdf.csv", metadata=refused, strict=False)
+    (message,) = _battinfo_warnings(caught)
+    assert "The BattINFO metadata is not checked." in message
+    # ...with no check against the bundled schema in its place, which would refuse "legacy_field"...
+    assert bundled not in message
+    # ...and the sidecar keeps the stated version, so the file's claim is not lost.
+    assert _stamp(tmp_path / "c.bdf.csv") == "0.7.0"
 
 
 @uses_cache
@@ -1653,7 +1658,7 @@ def test_a_plugin_read_of_a_refused_value_follows_validate(tmp_path: Path) -> No
     # validate off gives one warning with both paths...
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        _, meta = read(data, plugin=plugin, validate=False)
+        _, meta = read(data, plugin=plugin, strict=False)
     (message,) = [str(w.message) for w in caught if w.category is BDFMetadataWarning]
     assert "battinfo_test.test.started_at" in message
     assert "battinfo_test.test.instrument_name" in message
@@ -1683,18 +1688,16 @@ def _read_recording(p: Path, **kwargs: object) -> tuple[Metadata, list[warnings.
     return meta, caught
 
 
-def _assert_fell_back(meta: Metadata, caught: list[warnings.WarningMessage], stated: str, bundled: str) -> None:
-    """One BDFDefinitionWarning names the stated release, a reason and the bundle; the metadata keeps the stated release."""
-    (message,) = [str(w.message) for w in caught if w.category is BDFDefinitionWarning]
-    pattern = rf"Could not use BattINFO release {stated} .* states: .+\. Checking against the bundled release {bundled}"
+def _assert_not_checked(meta: Metadata, caught: list[warnings.WarningMessage], stated: str) -> None:
+    """One BDFDefinitionWarning names the stated schema and a reason, and no check ran; the metadata keeps the stated version."""
+    (message,) = _battinfo_warnings(caught)
+    pattern = rf"Could not load BattINFO schema {stated} .* states: .+\. The BattINFO metadata is not checked\."
     assert re.search(pattern, message, re.DOTALL)
     assert meta.bdf.battinfo_version == stated
-    # The fall-back uses the bundle for this read only; the module's default set is unchanged.
-    assert bdf.battinfo.BATTINFO_SCHEMA.version == bundled
 
 
-# In the "cannot be used" tests below, a read warns, checks against the bundle, and the returned
-# metadata keeps the stated release ("replaced by the bundle" means only for the check).
+# In the "cannot be loaded" tests below, a read raises by default; with strict=False it warns,
+# checks nothing, and the returned metadata keeps the stated version.
 
 
 @uses_cache
@@ -1734,38 +1737,36 @@ def test_a_read_with_a_named_set_checks_against_it_and_loads_no_other_release(
 
 
 @uses_cache
-def test_many_sidecars_at_an_unreachable_release_each_fall_back(
+def test_many_sidecars_at_an_unreachable_schema_each_raise_or_warn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _unreachable_github(monkeypatch)
-    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
 
-    # A scan of many files: the source remembers the failed fetch, so the second read does not
-    # try again, but it must still fall back and warn on its own; a remembered failure is not silent.
+    # A scan of many files: the source remembers the failed fetch, so a later read does not
+    # try again, but each read must still raise or warn on its own; a remembered failure is not silent.
     for folder in ("a", "b"):
         p = _sidecar_beside_data(tmp_path / folder, {"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
-        meta, caught = _read_recording(p)
-        _assert_fell_back(meta, caught, "0.7.0", bundled)
+        with pytest.raises(BDFDefinitionError, match="strict=False"):
+            read(p)
+        meta, caught = _read_recording(p, strict=False)
+        _assert_not_checked(meta, caught, "0.7.0")
 
 
 @uses_cache
-def test_a_stated_release_that_cannot_be_fetched_is_replaced_by_the_bundle(
+def test_a_stated_schema_that_cannot_be_fetched_is_not_checked_without_strict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Offline, with "legacy_field", which only 0.7.0 allows.
     _unreachable_github(monkeypatch)
-    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
     p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
 
-    meta, caught = _read_recording(p, validate=False)
+    meta, caught = _read_recording(p, strict=False)
 
-    _assert_fell_back(meta, caught, "0.7.0", bundled)
+    # Not checked, so no refusal: the bundled schema, which refuses "legacy_field", does not stand in.
+    _assert_not_checked(meta, caught, "0.7.0")
     # The warning points at the caller's line (this file), not at a line inside bdf.
-    (fallback,) = [w for w in caught if w.category is BDFDefinitionWarning]
-    assert fallback.filename == __file__
-    # The bundle did the check: it refuses "legacy_field", and the refusal names the bundled release.
-    (refusal,) = [str(w.message) for w in caught if w.category is BDFMetadataWarning]
-    assert f"BattINFO {bundled} refuses battinfo_test.test:" in refusal
+    (warning,) = [w for w in caught if w.category is BDFDefinitionWarning]
+    assert warning.filename == __file__
 
 
 @uses_cache
@@ -1783,28 +1784,28 @@ def test_a_0_2_0_sidecars_ref_is_read_as_release_0_8_0rc2(tmp_path: Path, monkey
 
 
 @uses_cache
-def test_a_stated_release_that_is_not_a_version_is_replaced_by_the_bundle(tmp_path: Path) -> None:
-    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
+def test_a_stated_schema_that_is_not_a_version_raises_or_is_not_checked(tmp_path: Path) -> None:
     # A branch name, not a version: bdf cannot fetch it, so this is like a failed fetch.
     p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_version="main")
 
-    meta, caught = _read_recording(p)
-
-    _assert_fell_back(meta, caught, "main", bundled)
+    with pytest.raises(BDFDefinitionError, match="'main' is not a version"):
+        read(p)
+    meta, caught = _read_recording(p, strict=False)
+    _assert_not_checked(meta, caught, "main")
 
 
 @uses_cache
-def test_a_stated_release_with_a_broken_reference_is_replaced_by_the_bundle(tmp_path: Path) -> None:
-    # A cached 0.7.0 that loads but cannot check anything: its $ref names a document it does not hold.
+def test_a_stated_schema_with_a_broken_reference_cannot_be_loaded(tmp_path: Path) -> None:
+    # A cached 0.7.0 whose $ref names a document it does not hold.
     doc = {"$id": "https://example.test/test.schema.json", "properties": {"test": {"$ref": "missing.schema.json"}}}
     cache_release(tmp_path, "0.7.0", {"test.schema.json": doc})
-    bundled = bdf.battinfo.BATTINFO_SCHEMA.version
     p = _sidecar_beside_data(tmp_path, {"test": {"name": "cell-1"}}, battinfo_version="0.7.0")
 
-    meta, caught = _read_recording(p)
-
-    # A release that cannot be used is treated like one that cannot be loaded.
-    _assert_fell_back(meta, caught, "0.7.0", bundled)
+    # bdf resolves every $ref when it opens a schema, so a broken one fails as a schema that cannot be loaded.
+    with pytest.raises(BDFDefinitionError, match="Could not load BattINFO schema 0.7.0"):
+        read(p)
+    meta, caught = _read_recording(p, strict=False)
+    _assert_not_checked(meta, caught, "0.7.0")
 
 
 # ---------------------------------------------------------------------------
@@ -1872,3 +1873,38 @@ def test_a_save_drops_battinfo_ref(tmp_path: Path) -> None:
 
     stated = json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]
     assert "battinfo_ref" not in stated
+
+
+# validate=False checks nothing: no release is loaded, nothing is refused, and both files are written.
+
+
+@uses_cache
+def test_a_save_without_validation_loads_and_checks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _unreachable_github(monkeypatch)
+    # A refused value, under releases that bdf cannot load offline: with validate on, this save would raise.
+    refused = _meta({"test": {"legacy_field": 1}}, battinfo_version="0.7.0", ontology_version="9.9.9")
+    p = tmp_path / "a.bdf.csv"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        io.save(_FRAME.drop("Current / A"), p, metadata=refused, validate=False)
+
+    # Nothing was fetched, and the sidecar states the releases that the metadata states.
+    assert fake.urls == []
+    assert _stamp(p) == "0.7.0"
+    assert json.loads(p.with_suffix(".metadata.json").read_text())["bdf"]["ontology_version"] == "9.9.9"
+
+
+@uses_cache
+def test_a_read_without_validation_loads_and_checks_no_battinfo_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _unreachable_github(monkeypatch)
+    p = _sidecar_beside_data(tmp_path, {"test": {"legacy_field": 1}}, battinfo_version="0.7.0")
+
+    meta, caught = _read_recording(p, validate=False)
+
+    # No fall-back and no refusal: the BattINFO release was never loaded, and the metadata keeps its claim.
+    assert _battinfo_warnings(caught) == []
+    assert fake.urls == []
+    assert meta.bdf.battinfo_version == "0.7.0"

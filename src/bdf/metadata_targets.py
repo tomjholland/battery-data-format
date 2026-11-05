@@ -11,7 +11,7 @@ The first segment must name a ``battinfo_*`` field of ``Metadata`` (or
 ``extras``); a wrong name raises ``AttributeError``. Any name extends the path
 below that, so a misspelled key there is found when the read checks the staged
 value against BattINFO: it raises ``BDFMetadataError``, or warns with
-``validate=False``.
+``strict=False``.
 There is no target for ``bdf``, which a read stamps itself.
 """
 

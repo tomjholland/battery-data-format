@@ -516,6 +516,7 @@ class TableNormalizer(BaseModel):
         df: pl.LazyFrame,
         *,
         validate: bool = True,
+        strict: bool = True,
         include_unknown: bool = False,
         tz: str = "UTC",
         day_month_order: DayMonthOrder | None = None,
@@ -524,14 +525,14 @@ class TableNormalizer(BaseModel):
         """Resolve headers → BDF columns, apply unit conversion, return df_out.
 
         Accepts ``pl.DataFrame``, ``pl.LazyFrame``, or ``pandas.DataFrame``. Return type matches input.
-        ``validate`` defaults to True: missing required BDF columns raise instead of warn, and
-        non-BDF columns trigger a ``UserWarning`` (see ``COLUMN_ONTOLOGY.validate_df``). Pass
-        ``validate=False`` to fall back to a soft warning instead of raising.
+        ``validate`` defaults to True: the columns are checked against the ontology (see
+        ``ColumnOntology.validate_df``); ``validate=False`` skips the check.
 
         Args:
             df: Input dataframe in any supported format.
-            validate: Validate column names against the BDF ontology when True (default;
-                raises on missing required columns instead of warning).
+            validate: Check column names against the ontology (default True).
+            strict: With ``validate``, raise on missing required columns (default True);
+                False warns instead.
             include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
             tz: IANA timezone applied to naive (no embedded offset) ``unix_time_second``
                 datetime formats. Defaults to ``"UTC"``; emits a ``UserWarning`` when a
@@ -551,13 +552,14 @@ class TableNormalizer(BaseModel):
 
         Raises:
             ValueError: If ``tz`` is not a recognized IANA timezone name.
-            BDFValidationError: If ``validate=True`` and required BDF columns are missing.
+            BDFValidationError: If ``validate`` and ``strict``, and required BDF columns are missing.
         """
         if self is BDF_NORMALIZER and ontology is not COLUMN_ONTOLOGY:
             # The BDF normalizer is derived from an ontology's labels.
             return _build_bdf_normalizer(ontology).normalize(
                 df,
                 validate=validate,
+                strict=strict,
                 include_unknown=include_unknown,
                 tz=tz,
                 day_month_order=day_month_order,
@@ -612,7 +614,8 @@ class TableNormalizer(BaseModel):
         if exprs:
             df = df.select(exprs)
 
-        ontology.validate_df(df, raise_on_error=validate)
+        if validate:
+            ontology.validate_df(df, raise_on_error=strict)
         return df
 
 
@@ -1236,6 +1239,7 @@ def normalize(
     *,
     normalizer: "TableNormalizer | dict[str, str] | None" = None,
     validate: bool = True,
+    strict: bool = True,
     include_unknown: bool = False,
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
@@ -1245,14 +1249,15 @@ def normalize(
 
     Accepts ``pl.DataFrame``, ``pl.LazyFrame``, or ``pandas.DataFrame``. Return type matches input.
     ``validate`` defaults to True: this checks required columns even if no normalizer can be
-    auto-detected from ``df``'s headers (see ``TableNormalizer.normalize``). Pass
-    ``validate=False`` to fall back to a soft warning instead of raising.
+    auto-detected from ``df``'s headers (see ``TableNormalizer.normalize``).
+    ``validate=False`` skips the check.
 
     Args:
         df: Input dataframe in any supported format.
         normalizer: Explicit TableNormalizer, column map dict, or None for auto-detection.
-        validate: Validate column names against the BDF ontology when True (default;
-            raises on missing required columns instead of warning).
+        validate: Check column names against the ontology (default True).
+        strict: With ``validate``, raise on missing required columns (default True);
+            False warns instead.
         include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
         tz: IANA timezone applied to naive ``unix_time_second`` datetime formats. Defaults
             to ``"UTC"``; emits a ``UserWarning`` when a naive format is in play and ``tz``
@@ -1270,7 +1275,7 @@ def normalize(
 
     Raises:
         ValueError: If ``tz`` is not a recognized IANA timezone name.
-        BDFValidationError: If ``validate=True`` and required BDF columns are missing.
+        BDFValidationError: If ``validate`` and ``strict``, and required BDF columns are missing.
     """
     if isinstance(df, (pl.DataFrame, pl.LazyFrame)):
         schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
@@ -1297,6 +1302,7 @@ def normalize(
     return norm.normalize(
         df,
         validate=validate,
+        strict=strict,
         include_unknown=include_unknown,
         tz=tz,
         day_month_order=day_month_order,

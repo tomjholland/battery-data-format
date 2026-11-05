@@ -61,7 +61,7 @@ class BdfReadInfo(_RecordModel):
     bdf_version: str | None = None
     """The batterydf version that wrote this sidecar."""
     ontology_version: str | None = None
-    """The BDF ontology release of the columns."""
+    """The version of the BDF ontology that the columns follow."""
     battinfo_ref: str | None = Field(
         default=None,
         deprecated="bdf.battinfo_ref is the BattINFO commit that bdf 0.2.0 wrote; use bdf.battinfo_version",
@@ -70,8 +70,8 @@ class BdfReadInfo(_RecordModel):
     """Deprecated: the BattINFO commit that bdf 0.2.0 wrote. A read still
     accepts it; a save writes ``battinfo_version`` in its place."""
     battinfo_version: str | None = None
-    """The BattINFO release of the ``battinfo_*`` fields. Set it to check
-    against another release."""
+    """The version of the BattINFO schema that the ``battinfo_*`` fields follow.
+    Set it to check against another version."""
 
 
 class Metadata(_RecordModel):
@@ -82,7 +82,7 @@ class Metadata(_RecordModel):
     ``battinfo_dataset``) each hold a plain dict in the shape of one BattINFO
     schema, for example ``meta.battinfo_test["test"]["instrument_name"]``.
     Values are stored as given. :meth:`check` lists the values that the
-    BattINFO release refuses; a read and a save run the same check.
+    BattINFO schema in ``bdf.battinfo_version`` refuses; a read and a save run the same check.
     """
 
     # A BattINFO schema allows no extra keys at its root, so `bdf`, `raw` and
@@ -115,22 +115,26 @@ class Metadata(_RecordModel):
     can put a value here with ``METADATA.extras["key"]``."""
 
     def check(self, schema: BattinfoSchema | None = None) -> list[str]:
-        """Return one line for each BattINFO value that a release refuses.
+        """Return one line for each value that a BattINFO schema refuses.
 
         Args:
-            schema: The release to check against. Default: the release in
-                ``bdf.battinfo_version``, else the bundled release.
+            schema: The BattINFO schema to check against. Default: the version in
+                ``bdf.battinfo_version``, else the bundled one.
 
         Returns:
             The lines, or ``[]`` where every value is accepted.
 
-        Warns:
-            BDFDefinitionWarning: Without ``schema``, when the stated release
-                cannot be used and the bundle is checked instead.
+        Raises:
+            BDFDefinitionError: Without ``schema``, if the version in
+                ``bdf.battinfo_version`` cannot be loaded.
         """
-        from bdf.battinfo import _check_metadata
+        from bdf.battinfo import BATTINFO_SCHEMA, FIELD_SCHEMAS, _has_battinfo, _load_schema, get_stated_release
 
-        return _check_metadata(self, "the metadata", schema=schema, stacklevel=2)[0]
+        if not _has_battinfo(self):
+            return []
+        if schema is None:
+            schema = _load_schema(get_stated_release(self) or BATTINFO_SCHEMA.version)
+        return [line for field in FIELD_SCHEMAS for line in schema.check(field, getattr(self, field))]
 
 
 def _unit_text_from_label(label: str) -> Optional[str]:

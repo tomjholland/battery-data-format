@@ -103,8 +103,8 @@ def test_the_update_command_needs_a_version(monkeypatch: pytest.MonkeyPatch) -> 
     # No version argument.
     monkeypatch.setattr(sys, "argv", ["bdf-update-battinfo"])
 
-    # BattINFO publishes only pre-releases, so there is no latest release to default to; the command refuses...
-    with pytest.raises(BDFDefinitionError, match="no latest release"):
+    # BattINFO publishes only pre-releases, so there is no latest BattINFO schema to default to; the command refuses...
+    with pytest.raises(BDFDefinitionError, match="no latest BattINFO schema"):
         _update_snapshot_cli()
 
     # ...before it makes any request.

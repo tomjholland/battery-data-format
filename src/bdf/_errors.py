@@ -14,8 +14,8 @@ class BDFDefinitionError(RuntimeError):
 
 
 class BDFDefinitionWarning(UserWarning):
-    """Warned when bdf falls back to a local version of definition data because upstream failed."""
+    """Warned when bdf cannot load definition data and uses a local version or skips a check instead."""
 
 
 class BDFMetadataWarning(UserWarning):
-    """Warned when a read or a save with validate=False keeps BattINFO metadata that the schema refuses."""
+    """Warned when a read or a save with strict=False keeps BattINFO metadata that the schema refuses."""

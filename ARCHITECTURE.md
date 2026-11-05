@@ -47,21 +47,22 @@ otherwise. Each BattINFO entity in it is a plain dict in the shape of its
 BattINFO JSON schema. `save()` writes the sidecar and refuses ambiguous
 overwrites, so a sidecar always describes the last save.
 
-BattINFO releases are definition data, as ontology releases are, and
-`bdf.battinfo` loads them through the same `DefinitionSource`. A release is a
-directory with a `VERSION` file and the JSON schema documents under
-`schemas/`. bdf bundles one release in `src/bdf/data/battinfo/`
-(`BATTINFO_SCHEMA`) and loads others from the cache or from the BattINFO
-repository (`BattinfoSchema.from_version`). `jsonschema` checks the entities
-against a release: a read and a save raise for a refused value, or warn with
-`validate=False`, and `Metadata.check()` returns the same lines. A partial
+The BattINFO schema is definition data, as the ontology is, and
+`bdf.battinfo` loads both through the same `DefinitionSource`. On disk, a
+BattINFO schema is a directory with a `VERSION` file and the JSON schema
+documents under `schemas/`. bdf bundles one BattINFO schema version in
+`src/bdf/data/battinfo/` (`BATTINFO_SCHEMA`) and loads other
+BattINFO schema versions from the cache or from the BattINFO repository
+(`BattinfoSchema.from_version`). `jsonschema` checks the `battinfo_*`
+fields against one BattINFO schema: a read and a save raise for a refused value,
+warn with `strict=False`, and check nothing with `validate=False`, and `Metadata.check()` returns the same lines. A partial
 record is valid, because the check ignores the `required` list of a record.
-`bdf-update-battinfo VERSION` writes a release into the bundle.
+`bdf-update-battinfo VERSION` writes a BattINFO schema into the bundle.
 
 ## Design rules that shape everything
 
 - **The ontology is the single source of truth.** Column meaning lives in the
-  ontology release, not in Python. The package syncs; it does not define.
+  ontology, not in Python. The package syncs; it does not define.
 - **The table carries measurements only.** Everything else (cell, test,
   dataset, provenance) is metadata in companion structures.
 - **Detect loudly, repair only on explicit request.** Data that contradicts

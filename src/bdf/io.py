@@ -12,7 +12,7 @@ import polars as pl
 
 from bdf._errors import BDFDefinitionError, BDFDefinitionWarning, BDFMetadataError, BDFMetadataWarning
 from bdf._time_scale import detect_scale_mismatch
-from bdf.battinfo import BattinfoSchema, _check_metadata, get_stated_release
+from bdf.battinfo import BATTINFO_SCHEMA, BattinfoSchema, _has_battinfo, _load_schema, get_stated_release
 from bdf.file_utils import open_compressed, strip_compression_suffix
 from bdf.metadata import Metadata
 from bdf.metadata_parsers import BdfSidecarParser
@@ -29,6 +29,7 @@ def _assemble_metadata(
     tz: str,
     day_month_order: DayMonthOrder | None = None,
     validate: bool = True,
+    strict: bool = True,
     battinfo: BattinfoSchema | None = None,
     stacklevel: int = 3,
 ) -> Metadata:
@@ -42,17 +43,20 @@ def _assemble_metadata(
             parser made; a sidecar keeps the source it states.
         tz: IANA timezone forwarded to the plugin's metadata parser.
         day_month_order: Field order forwarded to the plugin's metadata parser.
-        validate: Raise for a BattINFO value that the checked release refuses;
-            False warns ``BDFMetadataWarning`` and keeps the value.
-        battinfo: BattINFO release to check against, instead of the release
-            the metadata states.
+        validate: Check the ``battinfo_*`` fields; False checks nothing and loads no BattINFO schema.
+        strict: Raise where the stated BattINFO schema cannot be loaded or refuses a
+            value; False warns and keeps the value.
+        battinfo: BattINFO schema to check against, instead of the BattINFO
+            schema in ``bdf.battinfo_version``.
         stacklevel: ``warnings.warn`` stack level that reaches the caller, counted from ``_read``.
 
     Returns:
         The reserved sidecar's ``Metadata`` where ``<stem>.metadata.json``
         exists beside ``path``, restored repair records included; the
         plugin parser's ``Metadata`` otherwise, with ``bdf.source`` and
-        ``bdf.created_with`` set. The caller still applies this read's own repairs.
+        ``bdf.created_with`` set. Where a ``battinfo_*`` field holds data,
+        ``bdf.battinfo_version`` names the version of ``battinfo``, else the one
+        stated, else the bundled one. The caller still applies this read's own repairs.
 
     Raises:
         BDFMetadataError: A sidecar exists and cannot be restored. An empty
@@ -60,8 +64,10 @@ def _assemble_metadata(
             never a sidecar this read failed on. A later ``save()`` of that
             metadata would otherwise write over the file the read could not
             read.
-        BDFMetadataError: With ``validate``, the checked BattINFO release
-            refuses a value.
+        BDFMetadataError: With ``validate`` and ``strict``, the BattINFO schema
+            used for the check refuses a value.
+        BDFDefinitionError: With ``validate`` and ``strict``, the stated BattINFO
+            schema cannot be loaded.
     """
     import bdf
 
@@ -79,80 +85,74 @@ def _assemble_metadata(
         metadata.bdf.source = source
         metadata.bdf.created_with = bdf.__version__
 
-    lines, schema, fell_back = _check_metadata(metadata, path, schema=battinfo, stacklevel=stacklevel + 1)
-    if schema is not None and not fell_back:
-        metadata.bdf.battinfo_version = schema.version
+    if not _has_battinfo(metadata):
+        return metadata
+    version = battinfo.version if battinfo is not None else get_stated_release(metadata) or BATTINFO_SCHEMA.version
+    metadata.bdf.battinfo_version = version
+    if not validate:
+        return metadata
+    schema = battinfo or _load_stated("battinfo", version, path, strict=strict, stacklevel=stacklevel + 1)
+    lines = metadata.check(schema) if schema is not None else []
     if lines:
         assert schema is not None
         msg = (
-            f"BattINFO metadata read from {path} has values that release {schema.version!r} refuses. "
-            "Correct the values, or pass validate=False to read them with a warning:\n  " + "\n  ".join(lines)
+            f"BattINFO metadata read from {path} has values that BattINFO schema {schema.version!r} refuses. "
+            "Correct the values, or pass strict=False to read them with a warning:\n  " + "\n  ".join(lines)
         )
-        if validate:
+        if strict:
             raise BDFMetadataError(msg)
         warnings.warn(msg, BDFMetadataWarning, stacklevel=stacklevel + 1)
     return metadata
 
 
-def _resolve_ontology(
-    explicit: ColumnOntology | None,
-    stated: str | None,
-    where: str | Path,
-    *,
-    strict: bool = False,
-    stacklevel: int,
-) -> tuple[ColumnOntology, bool]:
-    """Return the ontology a call uses: ``explicit``, else the ``stated`` release, else the bundle.
+def _load_stated(
+    kind: Literal["ontology", "battinfo"], stated: str, where: str | Path, *, strict: bool, stacklevel: int
+) -> Any:
+    """Load the ontology or BattINFO schema whose version the metadata states.
 
     Args:
-        explicit: The caller's ``ontology=`` argument.
-        stated: The ontology release that the metadata states, if any.
+        kind: Which definition data to load; also the argument that names other data.
+        stated: The version that the metadata states.
         where: The file the call reads or writes, for the message.
-        strict: Raise, rather than fall back, when ``stated`` cannot be loaded.
-            A save passes its ``validate``, so that it never writes a file it
-            could not check against the release the file states.
-        stacklevel: ``warnings.warn`` stack level that reaches the caller.
+        strict: Raise, rather than warn, where the version cannot be loaded.
+        stacklevel: ``warnings.warn`` stack level, counted from this function's caller.
 
     Returns:
-        The ontology to use, and whether it is the bundled release in place
-        of a stated release that cannot be loaded. A fall-back warns
-        ``BDFDefinitionWarning``.
+        The ``ColumnOntology`` or ``BattinfoSchema``, or None, with a
+        ``BDFDefinitionWarning``, where it cannot be loaded and ``strict`` is False.
 
     Raises:
-        BDFDefinitionError: If ``strict`` and ``stated`` cannot be loaded.
+        BDFDefinitionError: If ``strict`` and the version cannot be loaded.
     """
-    if explicit is not None:
-        return explicit, False
-    if not stated:
-        return COLUMN_ONTOLOGY, False
-
-    def fall_back(reason: BDFDefinitionError) -> tuple[ColumnOntology, bool]:
-        bundled = COLUMN_ONTOLOGY.ontology_version
+    if kind == "ontology":
+        name = "ontology"
+        then = f"Using the bundled ontology {COLUMN_ONTOLOGY.ontology_version} for the column labels, without a column check."
+    else:
+        name, then = "BattINFO schema", "The BattINFO metadata is not checked."
+    try:
+        return _ontology_for(stated) if kind == "ontology" else _load_schema(stated)
+    except BDFDefinitionError as exc:
+        msg = f"Could not load {name} {stated} that {where}'s metadata states: {exc}."
         if strict:
             raise BDFDefinitionError(
-                f"Could not load ontology release {stated} that {where}'s metadata states: {reason}. "
-                f"Connect or cache the release, pass ontology=, or pass validate=False to check "
-                f"against the bundled release {bundled} and keep release {stated}."
-            ) from reason
-        warnings.warn(
-            f"Could not load ontology release {stated} that {where}'s metadata states: {reason}. "
-            f"Checking against the bundled release {bundled}; the metadata keeps release {stated}.",
-            BDFDefinitionWarning,
-            stacklevel=stacklevel + 2,
-        )
-        return COLUMN_ONTOLOGY, True
+                f"{msg} Connect or cache {name} {stated}, pass {kind}=, pass strict=False to skip the check, "
+                "or pass validate=False."
+            ) from exc
+        warnings.warn(f"{msg} {then}", BDFDefinitionWarning, stacklevel=stacklevel + 1)
+        return None
 
-    try:
-        name = ONTOLOGY_SOURCE.normalise(stated)
-    except BDFDefinitionError as exc:
-        return fall_back(exc)
+
+def _ontology_for(stated: str) -> ColumnOntology:
+    """Return ontology ``stated``: the bundled one, or one from the cache or upstream.
+
+    Raises:
+        BDFDefinitionError: If ``stated`` is not a version, or that ontology cannot be loaded.
+    """
+    name = ONTOLOGY_SOURCE.normalise(stated)
     bundled = COLUMN_ONTOLOGY.ontology_version
     if bundled and name == ONTOLOGY_SOURCE.normalise(bundled):
-        return COLUMN_ONTOLOGY, False
-    try:
-        return ColumnOntology.from_version(name), False
-    except BDFDefinitionError as exc:
-        return fall_back(exc)
+        return COLUMN_ONTOLOGY
+    return ColumnOntology.from_version(name)
 
 
 def _read(
@@ -161,6 +161,7 @@ def _read(
     plugin: Plugin | str | None = None,
     normalize: bool = True,
     validate: bool = True,
+    strict: bool = True,
     include_unknown: bool = False,
     lazy: bool = True,
     tz: str = "UTC",
@@ -173,8 +174,8 @@ def _read(
     """Read ``path`` (local file or URL) to BDF-canonical form, returning ``(df, metadata, ontology)``.
 
     Private implementation behind the public `read` and `scan` functions.
-    The metadata is assembled first, because the release that it states
-    chooses the ontology (see :func:`_resolve_ontology`) that the table is
+    The metadata is assembled first, because the ontology in its
+    ``bdf.ontology_version`` chooses the ontology (see :func:`_resolve_ontology`) that the table is
     normalized with. ``ontology`` in the result is the one the read used.
 
     Raises:
@@ -199,20 +200,29 @@ def _read(
         tz=tz,
         day_month_order=day_month_order,
         validate=validate,
+        strict=strict,
         battinfo=battinfo,
         stacklevel=stacklevel,
     )
     stated = metadata.bdf.ontology_version
-    used, fell_back = _resolve_ontology(ontology, stated, path, stacklevel=stacklevel)
-    if (stated or ontology is not None) and not fell_back:
-        # Name the release the frame was read with. After a fall-back the
-        # metadata keeps the stated release, so a later save checks against it.
-        metadata.bdf.ontology_version = used.ontology_version or None
+    check = validate
+    if ontology is not None:
+        used = ontology
+        metadata.bdf.ontology_version = ontology.ontology_version or None
+    elif stated:
+        # A frame needs an ontology to be read: where the stated one cannot be loaded, the
+        # bundled one gives the labels, and the metadata still states the ontology it names.
+        loaded = _load_stated("ontology", stated, path, strict=validate and strict, stacklevel=stacklevel)
+        used = loaded or COLUMN_ONTOLOGY
+        check = validate and loaded is not None
+    else:
+        used = COLUMN_ONTOLOGY
 
     bdf_df = resolved_plugin.table_parser.read(
         path,
         normalize=normalize,
-        validate=validate,
+        validate=check,
+        strict=strict,
         include_unknown=include_unknown,
         lazy=lazy,
         tz=tz,
@@ -220,8 +230,10 @@ def _read(
         ontology=used,
     )
 
-    if normalize:
-        bdf_df, repairs = _reconcile_time_scale(bdf_df, reconcile_time=reconcile_time, strict=validate, ontology=used)
+    if normalize and (validate or reconcile_time):
+        bdf_df, repairs = _reconcile_time_scale(
+            bdf_df, reconcile_time=reconcile_time, strict=validate and strict, ontology=used
+        )
         if repairs:
             metadata.bdf.time_reconciliation = repairs
 
@@ -330,7 +342,7 @@ def _reconcile_time_scale(
 
             raise BDFValidationError(
                 f"Elapsed-time/wall-clock mismatch: {detail}. Pass reconcile_time=True to "
-                f"rescale known unit factors, or validate=False to load the data as-is."
+                f"rescale known unit factors, strict=False to warn instead, or validate=False to skip the check."
             )
         warnings.warn(f"Elapsed-time/wall-clock mismatch: {detail}.", UserWarning, stacklevel=4)
 
@@ -345,6 +357,7 @@ def read(
     plugin: Plugin | str | None = None,
     normalize: bool = True,
     validate: bool = True,
+    strict: bool = True,
     include_unknown: bool = False,
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
@@ -361,9 +374,16 @@ def read(
         plugin: Plugin instance or registry id. Auto-detects if not set (default).
         normalize: Map vendor columns to BDF canonical names (default True); False returns
             raw source columns unchanged.
-        validate: Check columns against the BDF ontology, error if missing required columns,
-            and the BattINFO metadata against its release, error on a refused value
-            (default True); set to False to only warn (``BDFMetadataWarning`` for the metadata).
+        validate: Check the columns against the ontology, the time columns against
+            the wall clock, and the ``battinfo_*`` fields against their BattINFO schema
+            (default True). False checks nothing, and loads no BattINFO schema.
+        strict: With ``validate``, raise when a check fails (default True): missing
+            required columns or a time-scale mismatch raise ``BDFValidationError``, a
+            refused BattINFO value raises ``BDFMetadataError``, and an ontology or
+            BattINFO schema that the sidecar states but bdf cannot load raises
+            ``BDFDefinitionError``. False warns instead (``BDFMetadataWarning`` for the
+            metadata, ``BDFDefinitionWarning`` for definition data, whose check is then
+            skipped) and returns the data.
         include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
         tz: IANA timezone used to compute ``Unix Time / s`` if the source has naive datetime.
             Default is``"UTC"``, and will warn if source contains naive datetimes.
@@ -374,24 +394,25 @@ def read(
         reconcile_time: Elapsed-time columns are cross-checked against wall-clock
             increments when both are present (e.g. a vendor export storing milliseconds
             under a seconds header, GH #65). A mismatch raises ``BDFValidationError`` by
-            default (warns when ``validate=False``); pass ``reconcile_time=True`` to
+            default (warns when ``strict=False``, skipped when ``validate=False``); pass ``reconcile_time=True`` to
             explicitly rescale known unit factors, recorded under
             ``metadata.bdf.time_reconciliation``. Only active when ``normalize=True``.
         ontology: Ontology that gives the labels, units, dtypes and required columns.
-            Defaults to the release that the file's sidecar states, loaded from the
-            bundle, the cache, or upstream; to the bundled release when there is no
-            sidecar or it states none. A stated release that cannot be loaded gives
-            the bundled release with a ``BDFDefinitionWarning``, and the returned
-            metadata keeps the stated release; otherwise its
-            ``bdf.ontology_version`` names the release used.
-        battinfo: BattINFO release to check the ``battinfo_*`` fields against. Defaults to the
-            release that the sidecar states (``bdf.battinfo_version``, or a bdf 0.2.0
-            ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
-            5 s deadline; to the bundled release otherwise. A stated release that
-            cannot be loaded or used gives the bundled release with a
-            ``BDFDefinitionWarning``, and the returned metadata keeps the stated
-            release; otherwise its ``bdf.battinfo_version`` names the release
-            checked against.
+            Defaults to the ontology in the sidecar's ``bdf.ontology_version``,
+            loaded from the bundle, the cache, or upstream; to the bundled ontology when
+            there is no sidecar or it states none. Where that ontology cannot be loaded
+            (and the read does not raise, see ``strict``), the bundled ontology gives
+            the labels and the columns are not checked. The returned
+            ``bdf.ontology_version`` names ``ontology`` where it is given, else the
+            ontology the sidecar states.
+        battinfo: BattINFO schema to check the ``battinfo_*`` fields against. Defaults to
+            the BattINFO schema in the sidecar's ``bdf.battinfo_version`` (or the one a
+            bdf 0.2.0 ``battinfo_ref`` names), loaded from the bundle, the cache, or
+            upstream with a 5 s deadline; to the bundled BattINFO schema otherwise.
+            Where that schema cannot be loaded (and the read does not raise, see
+            ``strict``), the fields are not checked. The returned ``bdf.battinfo_version``
+            names the version of ``battinfo`` where it is given, else the version the
+            sidecar states, else the bundled one.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a DataFrame, and a ``Metadata``
@@ -401,13 +422,15 @@ def read(
 
     Raises:
         ValueError: If ``plugin`` is not None, a str, or a Plugin instance.
-        BDFMetadataError: With validate, the checked BattINFO release refuses a value of the metadata.
+        BDFMetadataError: With validate and strict, the BattINFO schema used for the check refuses a value of the metadata.
+        BDFDefinitionError: With validate and strict, the ontology or BattINFO schema that the sidecar states cannot be loaded.
     """
     bdf_df, metadata, _ = _read(
         path,
         plugin=plugin,
         normalize=normalize,
         validate=validate,
+        strict=strict,
         include_unknown=include_unknown,
         lazy=False,
         tz=tz,
@@ -425,6 +448,7 @@ def scan(
     plugin: Plugin | str | None = None,
     normalize: bool = True,
     validate: bool = True,
+    strict: bool = True,
     include_unknown: bool = False,
     tz: str = "UTC",
     day_month_order: DayMonthOrder | None = None,
@@ -446,9 +470,16 @@ def scan(
             None (default).
         normalize: Map vendor columns to BDF canonical names (default True); False returns
             raw source columns unchanged.
-        validate: Check columns against the BDF ontology, raising on missing required ones,
-            and the BattINFO metadata against its release, raising on a refused value
-            (default True); False only warns (``BDFMetadataWarning`` for the metadata).
+        validate: Check the columns against the ontology, the time columns against
+            the wall clock, and the ``battinfo_*`` fields against their BattINFO schema
+            (default True). False checks nothing, and loads no BattINFO schema.
+        strict: With ``validate``, raise when a check fails (default True): missing
+            required columns or a time-scale mismatch raise ``BDFValidationError``, a
+            refused BattINFO value raises ``BDFMetadataError``, and an ontology or
+            BattINFO schema that the sidecar states but bdf cannot load raises
+            ``BDFDefinitionError``. False warns instead (``BDFMetadataWarning`` for the
+            metadata, ``BDFDefinitionWarning`` for definition data, whose check is then
+            skipped) and returns the data.
         include_unknown: Keep columns outside of the BDF spec in the dataframe (default False).
         tz: IANA timezone used to compute ``Unix Time / s`` if the source has naive datetime.
             Default is``"UTC"``, and will warn if source contains naive datetimes.
@@ -461,24 +492,25 @@ def scan(
         reconcile_time: Elapsed-time columns are cross-checked against wall-clock
             increments when both are present (e.g. a vendor export storing milliseconds
             under a seconds header, GH #65). A mismatch raises ``BDFValidationError`` by
-            default (warns when ``validate=False``); pass ``reconcile_time=True`` to
+            default (warns when ``strict=False``, skipped when ``validate=False``); pass ``reconcile_time=True`` to
             explicitly rescale known unit factors, recorded under
             ``metadata.bdf.time_reconciliation``. Only active when ``normalize=True``.
         ontology: Ontology that gives the labels, units, dtypes and required columns.
-            Defaults to the release that the file's sidecar states, loaded from the
-            bundle, the cache, or upstream; to the bundled release when there is no
-            sidecar or it states none. A stated release that cannot be loaded gives
-            the bundled release with a ``BDFDefinitionWarning``, and the returned
-            metadata keeps the stated release; otherwise its
-            ``bdf.ontology_version`` names the release used.
-        battinfo: BattINFO release to check the ``battinfo_*`` fields against. Defaults to the
-            release that the sidecar states (``bdf.battinfo_version``, or a bdf 0.2.0
-            ``battinfo_ref``), loaded from the bundle, the cache, or upstream with a
-            5 s deadline; to the bundled release otherwise. A stated release that
-            cannot be loaded or used gives the bundled release with a
-            ``BDFDefinitionWarning``, and the returned metadata keeps the stated
-            release; otherwise its ``bdf.battinfo_version`` names the release
-            checked against.
+            Defaults to the ontology in the sidecar's ``bdf.ontology_version``,
+            loaded from the bundle, the cache, or upstream; to the bundled ontology when
+            there is no sidecar or it states none. Where that ontology cannot be loaded
+            (and the read does not raise, see ``strict``), the bundled ontology gives
+            the labels and the columns are not checked. The returned
+            ``bdf.ontology_version`` names ``ontology`` where it is given, else the
+            ontology the sidecar states.
+        battinfo: BattINFO schema to check the ``battinfo_*`` fields against. Defaults to
+            the BattINFO schema in the sidecar's ``bdf.battinfo_version`` (or the one a
+            bdf 0.2.0 ``battinfo_ref`` names), loaded from the bundle, the cache, or
+            upstream with a 5 s deadline; to the bundled BattINFO schema otherwise.
+            Where that schema cannot be loaded (and the read does not raise, see
+            ``strict``), the fields are not checked. The returned ``bdf.battinfo_version``
+            names the version of ``battinfo`` where it is given, else the version the
+            sidecar states, else the bundled one.
 
     Returns:
         Tuple of (df, metadata): the BDF table as a LazyFrame, and a ``Metadata``
@@ -488,13 +520,15 @@ def scan(
 
     Raises:
         ValueError: If ``plugin`` is not None, a str, or a Plugin instance.
-        BDFMetadataError: With validate, the checked BattINFO release refuses a value of the metadata.
+        BDFMetadataError: With validate and strict, the BattINFO schema used for the check refuses a value of the metadata.
+        BDFDefinitionError: With validate and strict, the ontology or BattINFO schema that the sidecar states cannot be loaded.
     """
     bdf_df, metadata, _ = _read(
         path,
         plugin=plugin,
         normalize=normalize,
         validate=validate,
+        strict=strict,
         include_unknown=include_unknown,
         lazy=True,
         tz=tz,
@@ -577,17 +611,15 @@ def _version_stamps(ontology_version: str | None, battinfo_version: str | None) 
     """Return the stamps a written sidecar carries (GH #106).
 
     Args:
-        ontology_version: The ontology release that the sidecar states: the
-            release the table was checked against, or the stated release
-            where ``save(validate=False)`` fell back.
-        battinfo_version: The BattINFO release that the save checked the
-            ``battinfo_*`` fields against, or the stated release where
-            ``save(validate=False)`` fell back; None where every
-            ``battinfo_*`` field is empty.
+        ontology_version: The ontology version that the sidecar states: that of
+            ``ontology=``, else the one the metadata states, else the bundled one.
+        battinfo_version: The BattINFO schema version that the sidecar states: that
+            of ``battinfo=``, else the one the metadata states, else the bundled one;
+            None where every ``battinfo_*`` field is empty.
 
     Returns:
         ``bdf_version`` (the installed package version), ``ontology_version``
-        (the release of ``ontology``), and ``battinfo_version``.
+        and ``battinfo_version``.
     """
     import bdf
 
@@ -605,20 +637,16 @@ def _sidecar_text(metadata: Metadata, ontology_version: str | None, battinfo_ver
     """Return the sidecar text for ``metadata``, or None where it carries nothing.
 
     The text is stamped with the writer's versions (GH #106):
-    ``bdf.bdf_version``, ``bdf.ontology_version`` (the release that the table
-    was checked against, or the stated release where ``save(validate=False)``
-    fell back) and ``bdf.battinfo_version`` (the release that the
-    ``battinfo_*`` fields were checked against, or the stated release after a
-    ``validate=False`` fall-back; absent where every ``battinfo_*`` field is
-    empty). The stamps identify the file's writer, so they replace any stamps
+    ``bdf.bdf_version``, ``bdf.ontology_version`` and ``bdf.battinfo_version``
+    (see :func:`_version_stamps`). The stamps identify the file's writer, so they replace any stamps
     the caller's object carries. The caller's object is not modified. A ``Metadata`` that carries nothing gives None:
     the stamps describe a sidecar, so they never create one.
 
     Args:
         metadata: Metadata to write. Only the values that differ from their
             defaults reach the text.
-        ontology_version: The ontology release that the sidecar states.
-        battinfo_version: The BattINFO release that the sidecar states.
+        ontology_version: The ontology version that the sidecar states.
+        battinfo_version: The BattINFO schema version that the sidecar states.
 
     Raises:
         ValueError: A value that JSON cannot hold, such as a ``numpy.int64``.
@@ -643,6 +671,7 @@ def save(
     *,
     metadata: Metadata | None = None,
     validate: bool = True,
+    strict: bool = True,
     labels: Literal["preferred", "machine", "unchanged"] = "unchanged",
     ontology: ColumnOntology | None = None,
     battinfo: BattinfoSchema | None = None,
@@ -668,40 +697,40 @@ def save(
             sidecar: a save that omits it beside an existing sidecar raises,
             because the sidecar describes the data the previous save wrote. The
             message states each out, one of which is a save to a different path.
-        validate: Check columns against the BDF ontology, raising on missing required ones,
-            and the ``battinfo_*`` fields of ``metadata``, raising on a refused value
-            (default True); False only warns, and writes both files.
+        validate: Check the columns against the ontology and the ``battinfo_*`` fields of
+            ``metadata`` against their BattINFO schema (default True). False checks
+            nothing and loads no BattINFO schema, and no ontology unless ``labels``
+            renames columns; both files are written.
+        strict: With ``validate``, raise when a check fails, or when the ontology or
+            BattINFO schema that ``metadata`` states cannot be loaded, and write nothing
+            (default True). False warns instead, skips the check of definition data
+            that cannot be loaded, and writes both files.
         labels: Style of column names to use (default: "unchanged"):
             "preferred": BDF preferred label, e.g. "Voltage / V"
             "machine": BDF machine-readable label e.g. "voltage_volt"
             "unchanged": Keep column names as-is
-        ontology: Ontology to check the columns against and to record in the
-            sidecar. Defaults to the release that ``metadata`` states (so a read
-            and then a save keeps the file's release), else the bundled release.
-            A stated release that cannot be loaded raises, unless
-            ``validate=False``: then the columns are checked against the
-            bundled release with a warning, and the sidecar keeps the stated
-            release.
-        battinfo: BattINFO release to check the ``battinfo_*`` fields of ``metadata`` against,
-            and to state in the sidecar. Defaults to the release that ``metadata``
-            states in ``bdf.battinfo_version``, else the bundled release. A stated
-            release that cannot be loaded or used raises, unless
-            ``validate=False``: then the ``battinfo_*`` fields are checked against the
-            bundled release with a ``BDFDefinitionWarning``, and the sidecar
-            keeps the stated release.
+        ontology: Ontology to check the columns against; the sidecar states its version.
+            Defaults to the ontology in ``metadata``'s ``bdf.ontology_version`` (so a
+            read and then a save keeps the file's ontology), else the bundled ontology.
+            The sidecar states that version whether or not bdf can load it.
+        battinfo: BattINFO schema to check the ``battinfo_*`` fields of ``metadata``
+            against; the sidecar states its version. Defaults to the BattINFO schema
+            in ``metadata``'s ``bdf.battinfo_version``, else the bundled one. The
+            sidecar states that version whether or not bdf can load it.
         **opts: Additional keyword arguments forwarded to the polars writer
             (``write_csv``/``write_parquet``/``write_ipc``/``write_json``/``write_ndjson``/
             ``write_excel``), or to the matching ``sink_*`` writer where ``df`` is a
             streamed ``LazyFrame``.
 
     Raises:
-        BDFDefinitionError: If ``validate`` and the ontology or BattINFO release
-            that ``metadata`` states cannot be loaded or used. Nothing is written.
+        BDFDefinitionError: If ``validate`` and ``strict``, and the ontology in
+            ``bdf.ontology_version`` or the BattINFO schema in ``bdf.battinfo_version``
+            of ``metadata`` cannot be loaded. Nothing is written.
         ValueError: If the format is unsupported, or compression is requested for xlsx output.
         FileExistsError: If ``metadata`` is omitted and a ``.metadata.json`` sidecar
             already sits beside the target.
-        BDFMetadataError: With ``validate``, the BattINFO release refuses a value
-            of ``metadata``. Neither file is written.
+        BDFMetadataError: With ``validate`` and ``strict``, the BattINFO schema used for the
+            check refuses a value of ``metadata``. Neither file is written.
         ValueError: ``metadata`` holds a value that JSON cannot hold. Neither file is written.
     """
     p = Path(pathlike)
@@ -723,31 +752,41 @@ def save(
         raise ValueError(msg)
 
     stated = metadata.bdf.ontology_version if metadata is not None else None
-    used, fell_back = _resolve_ontology(ontology, stated, p, strict=validate, stacklevel=2)
+    ontology_version = (
+        (ontology.ontology_version or None) if ontology is not None else stated or COLUMN_ONTOLOGY.ontology_version
+    )
     frame = _as_polars(df)
-    used.validate_df(frame, raise_on_error=validate)
-    frame = used.rename_labels(frame, labels)
+    used = ontology
+    if used is None and stated and (validate or labels != "unchanged"):
+        used = _load_stated("ontology", stated, p, strict=validate and strict, stacklevel=2)
+        if used is not None and validate:
+            used.validate_df(frame, raise_on_error=strict)
+    elif validate:
+        (used or COLUMN_ONTOLOGY).validate_df(frame, raise_on_error=strict)
+    frame = (used or COLUMN_ONTOLOGY).rename_labels(frame, labels)
 
     text: str | None = None
     if metadata is not None:
-        lines, schema, battinfo_fell_back = _check_metadata(
-            metadata, sidecar, schema=battinfo, strict=validate, stacklevel=2
-        )
-        if lines and schema is not None:
-            msg = (
-                f"The BattINFO metadata for {sidecar} does not pass the check against release {schema.version!r}. "
-                "Correct the values, set metadata.bdf.battinfo_version to the release they follow, "
-                "or pass validate=False to write them with a warning:\n  " + "\n  ".join(lines)
-            )
-            if validate:
-                raise BDFMetadataError(msg)
-            warnings.warn(msg, BDFMetadataWarning, stacklevel=2)
         battinfo_version = None
-        if battinfo_fell_back:
-            battinfo_version = get_stated_release(metadata)
-        elif schema is not None:
-            battinfo_version = schema.version
-        text = _sidecar_text(metadata, stated if fell_back else used.ontology_version or None, battinfo_version)
+        if _has_battinfo(metadata):
+            battinfo_version = (
+                battinfo.version if battinfo is not None else get_stated_release(metadata) or BATTINFO_SCHEMA.version
+            )
+            schema = battinfo
+            if validate and schema is None:
+                schema = _load_stated("battinfo", battinfo_version, sidecar, strict=strict, stacklevel=2)
+            lines = metadata.check(schema) if validate and schema is not None else []
+            if lines:
+                assert schema is not None
+                msg = (
+                    f"The BattINFO metadata for {sidecar} does not pass the check against BattINFO schema {schema.version!r}. "
+                    "Correct the values, set metadata.bdf.battinfo_version to the version they follow, "
+                    "or pass strict=False to write them with a warning:\n  " + "\n  ".join(lines)
+                )
+                if strict:
+                    raise BDFMetadataError(msg)
+                warnings.warn(msg, BDFMetadataWarning, stacklevel=2)
+        text = _sidecar_text(metadata, ontology_version, battinfo_version)
 
     if isinstance(frame, pl.LazyFrame) and spec.sink is not None:
         writer = getattr(frame, spec.sink)

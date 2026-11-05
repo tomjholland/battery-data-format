@@ -83,25 +83,35 @@ def test_the_bundled_stated_release_loads_nothing(tmp_path: Path, releases: Fake
     assert releases.asked == []
 
 
-def test_a_stated_release_that_cannot_load_falls_back_and_is_kept(tmp_path: Path, releases: FakeReleases) -> None:
+def test_a_stated_ontology_that_cannot_load_raises_or_reads_with_the_bundled_one(
+    tmp_path: Path, releases: FakeReleases
+) -> None:
     path = saved(tmp_path, OLDER)
     releases.down = True
-    with pytest.warns(BDFDefinitionWarning, match="1.2.9.*bundled release"):
-        df, metadata = io.read(path)
+    # With strict on, a read needs the stated ontology.
+    with pytest.raises(BDFDefinitionError, match="strict=False"):
+        io.read(path)
+    # With strict off, the bundled ontology gives the column labels, the columns are not checked,
+    # and the metadata keeps the stated ontology.
+    with pytest.warns(BDFDefinitionWarning, match="1.2.9.*bundled ontology.*without a column check"):
+        df, metadata = io.read(path, strict=False)
     assert metadata.bdf.ontology_version == "1.2.9"
     assert TEMPERATURE in df.columns
+    # validate=False also needs an ontology for the labels, so it reads with the bundled one too.
+    with pytest.warns(BDFDefinitionWarning, match="1.2.9.*bundled ontology"):
+        io.read(path, validate=False)
 
 
-def test_a_save_needs_the_stated_release_unless_validate_is_off(tmp_path: Path, releases: FakeReleases) -> None:
-    """A save never writes a file it could not check against the release the file states."""
+def test_a_save_needs_the_stated_release_unless_strict_is_off(tmp_path: Path, releases: FakeReleases) -> None:
+    """A save never writes a file it could not check against the ontology the file states."""
     df, metadata = io.read(saved(tmp_path, OLDER))
     releases.down = True
     target = tmp_path / "copy.bdf.parquet"
-    with pytest.raises(BDFDefinitionError, match="validate=False"):
+    with pytest.raises(BDFDefinitionError, match="strict=False"):
         io.save(df, target, metadata=metadata)
     assert not target.exists()
     with pytest.warns(BDFDefinitionWarning, match="1.2.9"):
-        io.save(df, target, metadata=metadata, validate=False)
+        io.save(df, target, metadata=metadata, strict=False)
     assert stated(target) == "1.2.9"
 
 
